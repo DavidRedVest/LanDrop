@@ -15,7 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # macos-latest (Sequoia) ships Xcode 16+, which removed AGL.framework —
+          # Qt6Gui's CMake target still references it, so linking fails with
+          # "ld: framework 'AGL' not found". macos-14 (Sonoma, Apple Silicon) still
+          # has it.
+          - os: macos-14
             platform: macos
           - os: windows-latest
             platform: windows
