@@ -1,0 +1,11 @@
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/common.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/landrop_server.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/landrop_client.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/edit_cache.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/rebuild_cache.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/common_autogen_timestamp_deps.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/common_autogen.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/landrop_server_autogen_timestamp_deps.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/landrop_server_autogen.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/landrop_client_autogen_timestamp_deps.dir
+/Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/CMakeFiles/landrop_client_autogen.dir
