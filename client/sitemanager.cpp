@@ -183,15 +183,14 @@ void SiteManagerDialog::onDelete() {
 }
 
 void SiteManagerDialog::onConnect() {
-    if (m_currentIndex < 0 || m_currentIndex >= m_sites.size()) {
-        const SiteInfo site = formToSite();
-        if (site.host.isEmpty()) {
-            QMessageBox::warning(this, QStringLiteral("连接"), QStringLiteral("请先选择或填写一个站点。"));
-            return;
-        }
-        m_selected = site;
-    } else {
-        m_selected = m_sites[m_currentIndex];
+    // 始终用表单当前的值连接,而不是选中行在 m_sites 里存的旧数据——列表选择
+    // 只是用来"把表单填进去"的快捷方式,用户选中一个站点后又手动改了字段
+    // (没点"保存"),这时候应该按他改过的内容连,而不是悄悄连回原来保存的地址。
+    const SiteInfo site = formToSite();
+    if (site.host.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("连接"), QStringLiteral("请先选择或填写一个站点。"));
+        return;
     }
+    m_selected = site;
     accept();
 }

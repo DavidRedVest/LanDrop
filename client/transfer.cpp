@@ -299,20 +299,34 @@ void TransferQueue::onTransferReady(bool success, const QString& message, const 
 }
 
 void TransferQueue::onWorkerProgress(int row, qint64 bytesTransferred) {
+    // Worker emits this once per BLOCK_SIZE chunk (e.g. every 256KB) — for a large
+    // file that can be tens of thousands of signals per transfer. Previously every
+    // single one triggered updateRow() -> dataChanged() -> a table repaint, which at
+    // that frequency flooded the main-thread event queue badly enough to (a) delay
+    // Connection's heartbeat PING/PONG processing past the timeout, causing a spurious
+    // "心跳超时" disconnect on large transfers, and (b) produce visible rendering
+    // glitches in the view (progress bar appearing to paint into a neighboring
+    // column) under the repaint storm. Keep the byte counter always current (cheap),
+    // but only push a UI update a few times a second.
     TransferTask& task = m_tasks[row];
+    task.bytesTransferred = bytesTransferred;
+
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (task.lastSpeedSampleMsec == 0) {
         task.lastSpeedSampleMsec = now;
-        task.lastSpeedSampleBytes = task.bytesTransferred;
-    }
-    const qint64 elapsedMs = now - task.lastSpeedSampleMsec;
-    if (elapsedMs >= 500) {
-        const qint64 deltaBytes = bytesTransferred - task.lastSpeedSampleBytes;
-        task.bytesPerSecond = elapsedMs > 0 ? (deltaBytes * 1000 / elapsedMs) : 0;
-        task.lastSpeedSampleMsec = now;
         task.lastSpeedSampleBytes = bytesTransferred;
+        updateRow(row);
+        return;
     }
-    task.bytesTransferred = bytesTransferred;
+
+    const qint64 elapsedMs = now - task.lastSpeedSampleMsec;
+    if (elapsedMs < 200) {
+        return;
+    }
+    const qint64 deltaBytes = bytesTransferred - task.lastSpeedSampleBytes;
+    task.bytesPerSecond = elapsedMs > 0 ? (deltaBytes * 1000 / elapsedMs) : 0;
+    task.lastSpeedSampleMsec = now;
+    task.lastSpeedSampleBytes = bytesTransferred;
     updateRow(row);
 }
 

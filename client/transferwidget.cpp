@@ -24,6 +24,10 @@ void TransferProgressDelegate::paint(QPainter* painter, const QStyleOptionViewIt
 
     const int percent = static_cast<int>(qBound<qint64>(qint64(0), transferred * 100 / total, qint64(100)));
 
+    // save/restore around the style call: QTableView reuses one QPainter across every
+    // cell in a paint pass, so any clip/pen/transform this delegate leaves dirty would
+    // otherwise bleed into whichever cell paints next.
+    painter->save();
     QStyleOptionProgressBar barOption;
     barOption.rect = option.rect.adjusted(2, 2, -2, -2);
     barOption.minimum = 0;
@@ -33,6 +37,7 @@ void TransferProgressDelegate::paint(QPainter* painter, const QStyleOptionViewIt
     barOption.textVisible = true;
 
     QApplication::style()->drawControl(QStyle::CE_ProgressBar, &barOption, painter);
+    painter->restore();
 }
 
 TransferWidget::TransferWidget(TransferQueue* queue, QWidget* parent)

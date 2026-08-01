@@ -153,8 +153,8 @@ private:
 // 常量定义
 constexpr int DEFAULT_PORT = 2121;
 constexpr int DATA_PORT = 2122;
-constexpr int MAX_PACKET_SIZE = 65536;
-constexpr int BLOCK_SIZE = 32768;
+constexpr int MAX_PACKET_SIZE = 524288;
+constexpr int BLOCK_SIZE = 262144;
 constexpr int TRANSFER_TIMEOUT_MS = 30000;
 
 } // namespace FTP
