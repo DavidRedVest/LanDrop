@@ -42,16 +42,22 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      # ---- macOS: bundle Qt frameworks into the .app with macdeployqt, ship as .dmg ----
+      # ---- macOS: bundle Qt frameworks into the .app with macdeployqt, ad-hoc sign
+      # (avoids the Gatekeeper "app is damaged" hard-block from an unsigned binary —
+      # this is NOT the same as a real Developer ID signature, so first launch still
+      # needs right-click > Open once; see README), ship as .zip (no dmg, matches
+      # Windows/Linux's plain download-and-run distribution) ----
       - name: Package (macOS)
         if: matrix.platform == 'macos'
         run: |
           set -euo pipefail
           mkdir -p dist
-          macdeployqt build/landrop_server.app -dmg
-          macdeployqt build/landrop_client.app -dmg
-          mv build/landrop_server.dmg "dist/LanDrop-Server-macOS.dmg"
-          mv build/landrop_client.dmg "dist/LanDrop-Client-macOS.dmg"
+          macdeployqt build/landrop_server.app
+          macdeployqt build/landrop_client.app
+          codesign --force --deep --sign - build/landrop_server.app
+          codesign --force --deep --sign - build/landrop_client.app
+          ditto -c -k --sequesterRsrc --keepParent build/landrop_server.app "dist/LanDrop-Server-macOS.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/landrop_client.app "dist/LanDrop-Client-macOS.zip"
 
       # ---- Windows: bundle Qt DLLs next to each .exe with windeployqt, ship as .zip ----
       - name: Package (Windows)

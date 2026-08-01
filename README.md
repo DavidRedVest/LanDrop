@@ -6,10 +6,15 @@
 
 ## 下载
 
-去 [Releases](https://github.com/DavidRedVest/LanDrop/releases) 页面下载对应平台的压缩包/安装包(macOS 是 `.dmg`,Windows 是 `.zip`,Linux 是 `.tar.gz`)。每个平台都分别打包了服务端和客户端(Linux 是两个二进制一起打包)。
+去 [Releases](https://github.com/DavidRedVest/LanDrop/releases) 页面下载对应平台的压缩包(macOS/Windows/Linux 都是 `.zip`/`.tar.gz`,不需要"安装"——解压后直接运行里面的可执行文件即可,不会往系统里写任何东西)。每个平台都分别打包了服务端和客户端(Linux 是两个二进制一起打包)。
 
-- **macOS**:打开 `.dmg`,把 `LanDrop 服务端.app` / `LanDrop 客户端.app` 拖进"应用程序"即可,已经打包好 Qt 运行库,不需要额外安装 Qt。
-- **Windows**:解压 `.zip` 后直接运行 `.exe`,同目录下已经带好了所需的 Qt DLL。
+- **macOS**:解压后直接运行 `LanDrop 服务端.app` / `LanDrop 客户端.app`,已经打包好 Qt 运行库,不需要额外安装 Qt。
+
+  ⚠️ **首次打开会被 Gatekeeper 拦截**,提示"已损坏,无法打开"或"无法验证开发者"——这是因为本项目没有购买 Apple 开发者证书($99/年)对 App 做官方签名+公证,不是文件真的坏了。解决方法二选一:
+  1. 在 Finder 里**右键点击** App → 选择"打开" → 弹窗里再点一次"打开"(只有首次需要这样,之后双击就正常了)。
+  2. 或者在终端执行 `xattr -cr "LanDrop 客户端.app"`(把下载时系统加上的隔离标记去掉)。
+
+- **Windows**:解压 `.zip` 后直接运行 `.exe`,同目录下已经带好了所需的 Qt DLL。Windows SmartScreen 可能会提示"未知发布者",点"更多信息" → "仍要运行"即可(原因同上,没有付费的代码签名证书)。
 - **Linux**:解压 `.tar.gz` 后需要自行通过发行版包管理器装好 Qt6 运行库(比如 `sudo apt install qt6-base-dev` 或对应发行版的等价包),再运行里面的二进制文件。
 
 ## 功能特性
@@ -58,7 +63,7 @@ cmake --build build
 
 ### 发布 / CI
 
-`.github/workflows/release.yml` 会在 macOS / Windows / Linux 三个平台上分别编译并打包(macOS 用 `macdeployqt` 打成 `.dmg`,Windows 用 `windeployqt` 打成 `.zip`,Linux 打成 `.tar.gz`)。推送形如 `v1.0.0` 的 tag 会自动创建一个 GitHub Release 并附上三个平台的包;也可以在 Actions 页面手动触发(`workflow_dispatch`)只生成构建产物、不发布 Release,用来验证构建是否正常。
+`.github/workflows/release.yml` 会在 macOS / Windows / Linux 三个平台上分别编译并打包(macOS 用 `macdeployqt` 打包 Qt 运行库后临时签名再压成 `.zip`,Windows 用 `windeployqt` 打成 `.zip`,Linux 打成 `.tar.gz`)。推送形如 `v1.0.0` 的 tag 会自动创建一个 GitHub Release 并附上三个平台的包;也可以在 Actions 页面手动触发(`workflow_dispatch`)只生成构建产物、不发布 Release,用来验证构建是否正常。
 
 ## 使用方法
 
