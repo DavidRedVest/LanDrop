@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch: {}
+
+env:
+  QT_VERSION: '6.8.3'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # ---- macOS: bundle Qt frameworks into the .app with macdeployqt, ship as .dmg ----
+      - name: Package (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          macdeployqt build/landrop_server.app -dmg
+          macdeployqt build/landrop_client.app -dmg
+          mv build/landrop_server.dmg "dist/LanDrop-Server-macOS.dmg"
+          mv build/landrop_client.dmg "dist/LanDrop-Client-macOS.dmg"
+
+      # ---- Windows: bundle Qt DLLs next to each .exe with windeployqt, ship as .zip ----
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist, stage/server, stage/client | Out-Null
+          Copy-Item build/Release/landrop_server.exe stage/server/
+          Copy-Item build/Release/landrop_client.exe stage/client/
+          windeployqt --release stage/server/landrop_server.exe
+          windeployqt --release stage/client/landrop_client.exe
+          Compress-Archive -Path stage/server/* -DestinationPath dist/LanDrop-Server-Windows.zip
+          Compress-Archive -Path stage/client/* -DestinationPath dist/LanDrop-Client-Windows.zip
+
+      # ---- Linux: ship raw binaries; Qt6 runtime is expected from the distro's package
+      # manager (e.g. `apt install qt6-base-dev` / equivalent) rather than bundled ----
+      - name: Package (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          mkdir -p dist stage
+          cp build/landrop_server build/landrop_client stage/
+          tar -C stage -czf dist/LanDrop-Linux-x86_64.tar.gz landrop_server landrop_client
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanDrop-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

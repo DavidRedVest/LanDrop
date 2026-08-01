@@ -19,7 +19,10 @@ add_library(common STATIC
 target_link_libraries(common Qt6::Core Qt6::Network)
 
 # Server executable
-add_executable(landrop_server
+# MACOSX_BUNDLE: produces a proper landrop_server.app (needed for macdeployqt / a real
+# release build); WIN32: links the GUI subsystem on Windows so no console window pops
+# up next to the Qt window. Both are no-ops on Linux.
+add_executable(landrop_server MACOSX_BUNDLE WIN32
     server/main.cpp
     server/ftpserver.cpp
     server/session.cpp
@@ -31,7 +34,7 @@ add_executable(landrop_server
 target_link_libraries(landrop_server common Qt6::Core Qt6::Network Qt6::Widgets)
 
 # Client executable
-add_executable(landrop_client
+add_executable(landrop_client MACOSX_BUNDLE WIN32
     client/main.cpp
     client/mainwindow.cpp
     client/connection.cpp

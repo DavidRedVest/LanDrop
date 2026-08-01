@@ -4,6 +4,14 @@
 
 主要场景:在自己的多台设备(比如一台 Mac、一台 Windows 笔记本)之间,通过局域网稳定、可视化地互传文件,不依赖公网、不依赖第三方网盘。
 
+## 下载
+
+去 [Releases](https://github.com/DavidRedVest/LanDrop/releases) 页面下载对应平台的压缩包/安装包(macOS 是 `.dmg`,Windows 是 `.zip`,Linux 是 `.tar.gz`)。每个平台都分别打包了服务端和客户端(Linux 是两个二进制一起打包)。
+
+- **macOS**:打开 `.dmg`,把 `LanDrop 服务端.app` / `LanDrop 客户端.app` 拖进"应用程序"即可,已经打包好 Qt 运行库,不需要额外安装 Qt。
+- **Windows**:解压 `.zip` 后直接运行 `.exe`,同目录下已经带好了所需的 Qt DLL。
+- **Linux**:解压 `.tar.gz` 后需要自行通过发行版包管理器装好 Qt6 运行库(比如 `sudo apt install qt6-base-dev` 或对应发行版的等价包),再运行里面的二进制文件。
+
 ## 功能特性
 
 - **双栏文件浏览器**:左边本地、右边远程,同一套界面和操作(浏览目录、新建文件夹、重命名、删除)。
@@ -22,7 +30,6 @@
 
 - 标准 FTP 协议支持(连接/托管第三方 FTP 服务器,如 NAS)
 - SFTP 客户端支持(基于系统自带 SSH,如 macOS/Linux 的 OpenSSH、Windows 的 OpenSSH 可选功能)
-- 安装包 / 打包分发(dmg、NSIS、AppImage 等)
 - 局域网自动发现设备
 
 ## 构建
@@ -47,7 +54,11 @@ cmake -B build -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
 cmake --build build
 ```
 
-编译产物为 `build/landrop_server`(服务端)和 `build/landrop_client`(客户端)。
+编译产物是 `landrop_server` 和 `landrop_client`。在 macOS 上因为是 `MACOSX_BUNDLE`,实际可执行文件在 `build/landrop_server.app/Contents/MacOS/landrop_server`(直接 `open build/landrop_server.app` 更方便);Windows/Linux 上就是普通的 `build/landrop_server(.exe)`。
+
+### 发布 / CI
+
+`.github/workflows/release.yml` 会在 macOS / Windows / Linux 三个平台上分别编译并打包(macOS 用 `macdeployqt` 打成 `.dmg`,Windows 用 `windeployqt` 打成 `.zip`,Linux 打成 `.tar.gz`)。推送形如 `v1.0.0` 的 tag 会自动创建一个 GitHub Release 并附上三个平台的包;也可以在 Actions 页面手动触发(`workflow_dispatch`)只生成构建产物、不发布 Release,用来验证构建是否正常。
 
 ## 使用方法
 
