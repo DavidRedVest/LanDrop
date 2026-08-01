@@ -1,6 +1,0 @@
-set(__QT_DEPLOY_TARGET_common_FILE /Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/libcommon.a)
-set(__QT_DEPLOY_TARGET_common_TYPE STATIC_LIBRARY)
-set(__QT_DEPLOY_TARGET_landrop_server_FILE /Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/landrop_server)
-set(__QT_DEPLOY_TARGET_landrop_server_TYPE EXECUTABLE)
-set(__QT_DEPLOY_TARGET_landrop_client_FILE /Users/liszt/home/2_AI_Work/FTP_Soft/FTP_Soft/build/landrop_client)
-set(__QT_DEPLOY_TARGET_landrop_client_TYPE EXECUTABLE)

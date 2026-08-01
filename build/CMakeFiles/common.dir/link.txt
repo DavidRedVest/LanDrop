@@ -1,2 +1,0 @@
-/usr/bin/ar qc libcommon.a CMakeFiles/common.dir/common_autogen/mocs_compilation.cpp.o CMakeFiles/common.dir/common/protocol.cpp.o CMakeFiles/common.dir/common/utils.cpp.o
-/usr/bin/ranlib libcommon.a
