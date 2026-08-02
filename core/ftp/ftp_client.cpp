@@ -492,9 +492,20 @@ FtpResult FtpClient::downloadFile(const std::string& remotePath, const std::stri
         if (m_cancelRequested.load()) {
             dataSocket.close();
             std::lock_guard<std::mutex> lock(m_controlMutex);
+            // 服务端没有实现 ABOR(已知、接受的简化,见 core/ftp/ftp_server.h)。
+            // 我们主动关闭数据连接后,服务端的 RETR 循环会在下一次 send() 失败时
+            // 检测到并回复 426——这是 RETR 命令本身的真正收尾回复,必须先读掉,
+            // 否则会被下一条命令误读,导致这条控制连接从此错位。读完之后再尽力发
+            // 一次 ABOR 探测(对我们自己的服务端只会换来"未知命令"的 502,无害;
+            // 对少数支持 Telnet 带外 ABOR 的第三方服务器可能有用),它的回复只
+            // best-effort 读一次,超时/失败都不当错误处理。
+            readReply(code, message, 5000);
             const std::string abor = "ABOR\r\n";
-            m_control.sendAll(abor.data(), abor.size());
-            readReply(code, message, 3000);
+            if (m_control.sendAll(abor.data(), abor.size())) {
+                int aborCode = 0;
+                std::string aborMessage;
+                readReply(aborCode, aborMessage, 2000);
+            }
             setState(TransferState::Cancelled);
             return FtpResult::Cancelled;
         }
@@ -643,9 +654,20 @@ FtpResult FtpClient::uploadFile(const std::string& localPath, const std::string&
 
     if (cancelled) {
         std::lock_guard<std::mutex> lock(m_controlMutex);
+        // 服务端没有实现 ABOR(已知、接受的简化,见 core/ftp/ftp_server.h)。我们
+        // 主动关闭数据连接产生的 EOF,在服务端的 STOR 接收循环里和"正常传输完成"
+        // 是同一个信号(recvSome() 返回 0)——服务端会直接回复 226,不会等我们
+        // 发的 ABOR。这是 STOR 命令本身的真正收尾回复,必须先读掉,否则会被下
+        // 一条命令误读,导致这条控制连接从此错位(此 bug 曾被真实复现:暂停一次
+        // 上传后再续传,续传请求会读到这条错位的回复而失败)。读完之后再尽力发
+        // 一次 ABOR 探测,回复 best-effort 读一次,超时/失败都不当错误处理。
+        readReply(code, message, 5000);
         const std::string abor = "ABOR\r\n";
-        m_control.sendAll(abor.data(), abor.size());
-        readReply(code, message, 3000);
+        if (m_control.sendAll(abor.data(), abor.size())) {
+            int aborCode = 0;
+            std::string aborMessage;
+            readReply(aborCode, aborMessage, 2000);
+        }
         setState(TransferState::Cancelled);
         return FtpResult::Cancelled;
     }
