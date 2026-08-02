@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QStyleOptionProgressBar>
 #include <QApplication>
+#include <QWidget>
 #include <algorithm>
 #include <functional>
 
@@ -29,14 +30,30 @@ void TransferProgressDelegate::paint(QPainter* painter, const QStyleOptionViewIt
     // otherwise bleed into whichever cell paints next.
     painter->save();
     QStyleOptionProgressBar barOption;
+    // initFrom() seeds state/palette/direction/fontMetrics from the actual viewport widget.
+    // Without it, QStyleOptionProgressBar::state defaults to State_None (not Enabled, not
+    // Active, not Horizontal) — on QMacStyle specifically this incomplete state produces
+    // wrong/stale geometry (observed: first row's bar painted under the wrong column
+    // entirely, later rows painted nothing at all), not just a visual glitch. rect is
+    // overwritten afterward with this cell's own rect since initFrom() sets it to the
+    // whole widget's rect.
+    if (option.widget) {
+        barOption.initFrom(option.widget);
+    }
     barOption.rect = option.rect.adjusted(2, 2, -2, -2);
+    barOption.state |= QStyle::State_Enabled | QStyle::State_Active | QStyle::State_Horizontal;
+    barOption.direction = option.direction;
+    barOption.fontMetrics = option.fontMetrics;
+    barOption.palette = option.palette;
     barOption.minimum = 0;
     barOption.maximum = 100;
     barOption.progress = percent;
     barOption.text = QStringLiteral("%1%").arg(percent);
     barOption.textVisible = true;
+    barOption.textAlignment = Qt::AlignCenter;
 
-    QApplication::style()->drawControl(QStyle::CE_ProgressBar, &barOption, painter);
+    QStyle* style = option.widget ? option.widget->style() : QApplication::style();
+    style->drawControl(QStyle::CE_ProgressBar, &barOption, painter, option.widget);
     painter->restore();
 }
 
