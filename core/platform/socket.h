@@ -64,12 +64,22 @@ public:
     bool accept(Socket& outClient, int timeoutMs = -1);
 
     // 发送 len 字节,内部循环处理部分写入,直到全部发完或出错(返回 false)。
+    // 注意:非阻塞模式下写缓冲区满时,这个函数内部会以 timeoutMs=-1(无限等待)
+    // 调用 waitWritable() ——也就是说它本身不可被外部取消标志中断。需要在长时间
+    // 传输中支持"取消"/超时检测的调用方(比如 FtpClient 的分块上传循环),应该改用
+    // 下面的 sendSome() 自己实现"发送一块、检查取消标志、必要时带超时地等可写"的循环,
+    // 而不是直接指望 sendAll 在这种场景下能被打断。
     bool sendAll(const void* data, size_t len);
 
     // 读取最多 len 字节。返回值:>0 实际读到的字节数;0 表示对端正常关闭连接;
     // -1 表示出错;-2 表示当前是非阻塞模式且暂时没有数据(调用方应该
     // waitReadable() 之后重试)。
     long recvSome(void* buf, size_t len);
+
+    // 发送最多 len 字节,可能只发出一部分(比如写缓冲区满)。与 recvSome 对称的
+    // 语义:>=0 实际发送的字节数;-1 出错;-2 非阻塞模式下暂时不可写(调用方应该
+    // waitWritable() 之后重试,期间可以检查取消标志/做超时判断)。
+    long sendSome(const void* data, size_t len);
 
     void setNonBlocking(bool enable);
     void close();

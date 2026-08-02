@@ -314,6 +314,36 @@ long Socket::recvSome(void* buf, size_t len) {
 #endif
 }
 
+long Socket::sendSome(const void* data, size_t len) {
+    if (!isValid()) return -1;
+#ifdef _WIN32
+    const int chunk = len > 0x7fffffff ? 0x7fffffff : static_cast<int>(len);
+    const int n = ::send(m_fd, static_cast<const char*>(data), chunk, 0);
+    if (n == SOCKET_ERROR) {
+        const int err = lastSocketError();
+        if (wouldBlock(err)) return -2;
+        return -1;
+    }
+    return n;
+#else
+    for (;;) {
+        const long n =
+#if defined(__APPLE__)
+            ::send(m_fd, data, len, 0); // SO_NOSIGPIPE already set on this fd
+#else
+            ::send(m_fd, data, len, MSG_NOSIGNAL);
+#endif
+        if (n < 0) {
+            const int err = lastSocketError();
+            if (wasInterrupted(err)) continue;
+            if (wouldBlock(err)) return -2;
+            return -1;
+        }
+        return n;
+    }
+#endif
+}
+
 WaitResult Socket::waitReadable(int timeoutMs) const {
     if (!isValid()) return WaitResult::Error;
     fd_set set;

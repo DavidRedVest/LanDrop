@@ -30,6 +30,7 @@ add_library(ftpcore STATIC
     core/platform/socket.cpp
     core/heartbeat.cpp
     core/hash/sha256.cpp
+    core/ftp/ftp_client.cpp
 )
 target_include_directories(ftpcore PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(ftpcore PUBLIC Threads::Threads)
@@ -41,10 +42,18 @@ endif()
 # target rather than silently getting empty moc stubs generated into it.
 set_target_properties(ftpcore PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 
-# Standalone (no Qt) verification binary for ftpcore — see core/tests/.
+# Standalone (no Qt) verification binaries for ftpcore — see core/tests/.
 add_executable(socket_smoke_test core/tests/socket_smoke_test.cpp)
 target_link_libraries(socket_smoke_test ftpcore)
 set_target_properties(socket_smoke_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
+add_executable(ftp_client_parse_test core/tests/ftp_client_parse_test.cpp)
+target_link_libraries(ftp_client_parse_test ftpcore)
+set_target_properties(ftp_client_parse_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
+add_executable(ftp_client_test core/tests/ftp_client_test.cpp)
+target_link_libraries(ftp_client_test ftpcore)
+set_target_properties(ftp_client_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 
 # App icon: resources/icons/landrop.png is embedded as a Qt resource and set as
 # the runtime window icon (title bar / dock / taskbar) on every platform.
