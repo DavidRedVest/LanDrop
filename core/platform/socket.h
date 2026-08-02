@@ -91,6 +91,9 @@ public:
     WaitResult waitWritable(int timeoutMs) const;
 
     std::string peerAddress() const;
+    // 本端(getsockname)的 IP——PASV 用它拼被动模式回复里的地址,即"客户端连过来
+    // 的那个接口地址",而不是随便取一个本机 IP(多网卡时可能猜错)。
+    std::string localAddress() const;
     uint16_t localPort() const;
 
 private:

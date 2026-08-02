@@ -394,6 +394,16 @@ std::string Socket::peerAddress() const {
     return std::string(buf);
 }
 
+std::string Socket::localAddress() const {
+    if (!isValid()) return {};
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    if (::getsockname(m_fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) return {};
+    char buf[INET_ADDRSTRLEN] = {};
+    if (::inet_ntop(AF_INET, &addr.sin_addr, buf, sizeof(buf)) == nullptr) return {};
+    return std::string(buf);
+}
+
 uint16_t Socket::localPort() const {
     if (!isValid()) return 0;
     sockaddr_in addr{};
