@@ -18,6 +18,34 @@ add_library(common STATIC
 
 target_link_libraries(common Qt6::Core Qt6::Network)
 
+# ---------------------------------------------------------------------------
+# ftpcore: pure C++ (no Qt) networking/concurrency core — see core/. Native
+# sockets, std::thread-based heartbeat, self-contained SHA-256. Nothing in
+# this target links against any Qt module; this is the "core logic" half of
+# the strict core/UI split — Qt only appears in the GUI executables below.
+# ---------------------------------------------------------------------------
+find_package(Threads REQUIRED)
+
+add_library(ftpcore STATIC
+    core/platform/socket.cpp
+    core/heartbeat.cpp
+    core/hash/sha256.cpp
+)
+target_include_directories(ftpcore PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(ftpcore PUBLIC Threads::Threads)
+if(WIN32)
+    target_link_libraries(ftpcore PUBLIC ws2_32)
+endif()
+# Qt's AUTOMOC/AUTORCC/AUTOUIC are ON project-wide (for the GUI targets below);
+# explicitly turn them off here so this stays a real, verifiable "no Qt at all"
+# target rather than silently getting empty moc stubs generated into it.
+set_target_properties(ftpcore PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
+# Standalone (no Qt) verification binary for ftpcore — see core/tests/.
+add_executable(socket_smoke_test core/tests/socket_smoke_test.cpp)
+target_link_libraries(socket_smoke_test ftpcore)
+set_target_properties(socket_smoke_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
 # App icon: resources/icons/landrop.png is embedded as a Qt resource and set as
 # the runtime window icon (title bar / dock / taskbar) on every platform.
 # Additionally: on macOS the .icns is bundled as the .app's Finder/Dock icon; on
