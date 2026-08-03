@@ -1,215 +1,142 @@
 #include "connection.h"
 
-#include <QTcpSocket>
-#include <QTimer>
+#include "../core/ftp/ftp_client.h"
 
-using FTP::Command;
-using FTP::Packet;
+#include <QMetaObject>
 
-namespace {
-constexpr int kHeartbeatIntervalMs = 15000;
-}
+Connection::Connection(QObject* parent) : QObject(parent) {}
 
-Connection::Connection(QObject* parent)
-    : QObject(parent)
-    , m_socket(new QTcpSocket(this))
-{
-    connect(m_socket, &QTcpSocket::connected, this, &Connection::onSocketConnected);
-    connect(m_socket, &QTcpSocket::disconnected, this, &Connection::onSocketDisconnected);
-    connect(m_socket, &QTcpSocket::errorOccurred, this, &Connection::onSocketError);
-    connect(m_socket, &QTcpSocket::readyRead, this, &Connection::onReadyRead);
-
-    m_heartbeatTimer = new QTimer(this);
-    connect(m_heartbeatTimer, &QTimer::timeout, this, &Connection::onHeartbeatTimeout);
+Connection::~Connection() {
+    disconnectFromHost();
 }
 
 void Connection::connectToHost(const QString& host, quint16 port) {
+    disconnectFromHost(); // 清理掉任何上一次连接留下的线程,再开始新的一次
+
     m_host = host;
     m_port = port;
-    m_socket->connectToHost(host, port);
+    m_stopRequested = false;
+    m_thread = std::thread(&Connection::threadMain, this);
 }
 
 void Connection::disconnectFromHost() {
-    m_heartbeatTimer->stop();
-    m_socket->disconnectFromHost();
+    if (!m_thread.joinable()) return;
+    m_stopRequested = true;
+    m_queueCv.notify_all();
+    m_thread.join();
 }
 
-bool Connection::isConnected() const {
-    return m_socket->state() == QAbstractSocket::ConnectedState;
-}
-
-void Connection::onSocketConnected() {
-    m_heartbeatTimer->start(kHeartbeatIntervalMs);
-    emit connected();
-}
-
-void Connection::onSocketDisconnected() {
-    m_heartbeatTimer->stop();
-    emit disconnected();
-}
-
-void Connection::onSocketError(QAbstractSocket::SocketError) {
-    emit connectionError(m_socket->errorString());
-}
-
-void Connection::onReadyRead() {
-    m_framer.feed(m_socket->readAll());
-    while (m_framer.hasPacket()) {
-        handlePacket(m_framer.takePacket());
+void Connection::pushJob(Job job) {
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_jobs.push_back(std::move(job));
     }
+    m_queueCv.notify_one();
 }
 
-void Connection::onHeartbeatTimeout() {
-    if (m_pongPending) {
-        emit connectionError(QStringLiteral("心跳超时"));
-        m_socket->disconnectFromHost();
+void Connection::threadMain() {
+    core::FtpClient client;
+    const core::FtpResult result = client.connect(m_host.toStdString(), m_port, 5000);
+    if (result != core::FtpResult::Ok) {
+        QMetaObject::invokeMethod(
+            this, [this] { emit connectionError(QStringLiteral("连接失败,请检查地址、端口和网络")); },
+            Qt::QueuedConnection);
         return;
     }
-    sendPacket(Packet(Command::PING));
-    m_pongPending = true;
-}
 
-void Connection::sendPacket(const Packet& packet) {
-    FTP::writeFramedPacket(m_socket, packet);
+    m_connected = true;
+    QMetaObject::invokeMethod(this, [this] { emit connected(); }, Qt::QueuedConnection);
+
+    std::unique_lock<std::mutex> lock(m_queueMutex);
+    while (!m_stopRequested.load()) {
+        m_queueCv.wait(lock, [this] { return m_stopRequested.load() || !m_jobs.empty(); });
+        if (m_stopRequested.load()) break;
+
+        Job job = std::move(m_jobs.front());
+        m_jobs.pop_front();
+        lock.unlock();
+        job(client);
+        lock.lock();
+    }
+    lock.unlock();
+
+    m_connected = false;
+    client.disconnect();
+    QMetaObject::invokeMethod(this, [this] { emit disconnected(); }, Qt::QueuedConnection);
 }
 
 void Connection::login(const QString& username, const QString& password) {
-    Packet p(Command::LOGIN);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << username << password;
-    sendPacket(p);
+    const std::string user = username.toStdString();
+    const std::string pass = password.toStdString();
+    pushJob([this, user, pass](core::FtpClient& client) {
+        const bool success = client.login(user, pass) == core::FtpResult::Ok;
+        const QString message = success ? QString() : QStringLiteral("用户名或密码错误");
+        QMetaObject::invokeMethod(
+            this, [this, success, message] { emit loginResult(success, message); }, Qt::QueuedConnection);
+    });
 }
 
 void Connection::listDirectory(const QString& path) {
-    Packet p(Command::LIST_FILES);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << path;
-    sendPacket(p);
+    const std::string remotePath = path.toStdString();
+    pushJob([this, remotePath, path](core::FtpClient& client) {
+        std::vector<core::FtpFileEntry> entries;
+        const bool success = client.list(remotePath, entries) == core::FtpResult::Ok;
+        QList<FTP::FileInfo> list;
+        if (success) {
+            list.reserve(static_cast<int>(entries.size()));
+            for (const auto& e : entries) {
+                FTP::FileInfo info;
+                info.name = QString::fromStdString(e.name);
+                info.size = static_cast<qint64>(e.size);
+                info.isDirectory = e.isDirectory;
+                // modifiedTime/permissions 保持默认(空)——见 common/ftptypes.h 里的说明。
+                list.append(info);
+            }
+        }
+        const QString message = success ? QString() : QStringLiteral("目录加载失败");
+        QMetaObject::invokeMethod(
+            this, [this, success, path, message, list] { emit directoryListed(success, path, message, list); },
+            Qt::QueuedConnection);
+    });
 }
 
 void Connection::mkdir(const QString& path) {
-    Packet p(Command::MKDIR);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << path;
-    sendPacket(p);
+    const std::string p = path.toStdString();
+    pushJob([this, p](core::FtpClient& client) {
+        const bool success = client.mkdir(p) == core::FtpResult::Ok;
+        const QString message = success ? QString() : QStringLiteral("创建目录失败");
+        QMetaObject::invokeMethod(
+            this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
+    });
 }
 
 void Connection::rmdir(const QString& path) {
-    Packet p(Command::RMDIR);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << path;
-    sendPacket(p);
+    const std::string p = path.toStdString();
+    pushJob([this, p](core::FtpClient& client) {
+        const bool success = client.rmdir(p) == core::FtpResult::Ok;
+        const QString message = success ? QString() : QStringLiteral("删除目录失败");
+        QMetaObject::invokeMethod(
+            this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
+    });
 }
 
 void Connection::deleteFile(const QString& path) {
-    Packet p(Command::DELETE_FILE);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << path;
-    sendPacket(p);
+    const std::string p = path.toStdString();
+    pushJob([this, p](core::FtpClient& client) {
+        const bool success = client.removeFile(p) == core::FtpResult::Ok;
+        const QString message = success ? QString() : QStringLiteral("删除文件失败");
+        QMetaObject::invokeMethod(
+            this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
+    });
 }
 
 void Connection::rename(const QString& oldPath, const QString& newPath) {
-    Packet p(Command::RENAME);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << oldPath << newPath;
-    sendPacket(p);
-}
-
-void Connection::changeDir(const QString& path) {
-    Packet p(Command::CHANGE_DIR);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << path;
-    sendPacket(p);
-}
-
-void Connection::requestUpload(const QString& path, qint64 fileSize) {
-    Packet p(Command::UPLOAD_START);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << path << fileSize;
-    sendPacket(p);
-}
-
-void Connection::requestDownload(const QString& path, qint64 localExistingSize) {
-    Packet p(Command::DOWNLOAD_START);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << path << localExistingSize;
-    sendPacket(p);
-}
-
-void Connection::cancelTransfer(const QString& token) {
-    Packet p(Command::TRANSFER_CANCEL);
-    QDataStream out(&p.payload, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_6_0);
-    out << token;
-    sendPacket(p);
-}
-
-void Connection::handlePacket(const Packet& packet) {
-    QDataStream in(packet.payload);
-    in.setVersion(QDataStream::Qt_6_0);
-
-    switch (packet.command) {
-    case Command::LOGIN_RESP: {
-        bool success = false;
-        QString message;
-        in >> success >> message;
-        emit loginResult(success, message);
-        break;
-    }
-    case Command::FILE_LIST: {
-        bool success = false;
-        QString message, path;
-        in >> success >> message >> path;
-        QList<FTP::FileInfo> list;
-        if (success) {
-            list = FTP::readFileInfoList(in);
-        }
-        emit directoryListed(success, path, message, list);
-        break;
-    }
-    case Command::DIR_RESPONSE: {
-        bool success = false;
-        QString path, message;
-        in >> success >> path >> message;
-        emit directoryChanged(success, path, message);
-        break;
-    }
-    case Command::TRANSFER_READY: {
-        bool success = false;
-        QString message, token;
-        qint64 resumeOffset = 0;
-        in >> success >> message >> token >> resumeOffset;
-        emit transferReady(success, message, token, resumeOffset);
-        break;
-    }
-    case Command::SUCCESS: {
-        QString message;
-        in >> message;
-        emit operationResult(true, message);
-        break;
-    }
-    case Command::ERROR: {
-        QString message;
-        in >> message;
-        emit operationResult(false, message);
-        break;
-    }
-    case Command::PING:
-        sendPacket(Packet(Command::PONG));
-        break;
-    case Command::PONG:
-        m_pongPending = false;
-        break;
-    default:
-        break;
-    }
+    const std::string from = oldPath.toStdString();
+    const std::string to = newPath.toStdString();
+    pushJob([this, from, to](core::FtpClient& client) {
+        const bool success = client.rename(from, to) == core::FtpResult::Ok;
+        const QString message = success ? QString() : QStringLiteral("重命名失败");
+        QMetaObject::invokeMethod(
+            this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
+    });
 }

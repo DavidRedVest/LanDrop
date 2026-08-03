@@ -1,11 +1,12 @@
 #include "serverwindow.h"
 #include "ftpserver.h"
-#include "../common/protocol.h"
+#include "../common/ftptypes.h"
 
 #include <QWidget>
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QPushButton>
+#include <QCheckBox>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QAbstractItemView>
@@ -21,6 +22,7 @@
 #include <QSettings>
 #include <QHeaderView>
 #include <QDateTime>
+#include <QHostInfo>
 
 ServerWindow::ServerWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -48,10 +50,15 @@ ServerWindow::ServerWindow(QWidget* parent)
     m_portSpin = new QSpinBox(configGroup);
     m_portSpin->setRange(1024, 65534);
     m_portSpin->setValue(FTP::DEFAULT_PORT);
-    configLayout->addRow(QStringLiteral("控制端口(数据端口=端口+1):"), m_portSpin);
+    // 标准 FTP 用 PASV 按需动态分配数据端口,不再是固定的"端口+1"(那是旧自定义
+    // 协议的约定),所以这里的说明文字也要跟着改。
+    configLayout->addRow(QStringLiteral("控制端口(数据端口由 PASV 动态分配):"), m_portSpin);
 
     m_startStopButton = new QPushButton(QStringLiteral("启动服务"), configGroup);
     configLayout->addRow(m_startStopButton);
+
+    m_discoveryCheck = new QCheckBox(QStringLiteral("允许被局域网自动发现"), configGroup);
+    configLayout->addRow(m_discoveryCheck);
 
     m_statusLabel = new QLabel(QStringLiteral("未运行"), configGroup);
     configLayout->addRow(QStringLiteral("状态:"), m_statusLabel);
@@ -99,6 +106,7 @@ ServerWindow::ServerWindow(QWidget* parent)
     connect(browseButton, &QPushButton::clicked, this, &ServerWindow::onBrowseRootPath);
     connect(m_startStopButton, &QPushButton::clicked, this, &ServerWindow::onToggleServer);
     connect(addUserButton, &QPushButton::clicked, this, &ServerWindow::onAddUser);
+    connect(m_discoveryCheck, &QCheckBox::toggled, this, &ServerWindow::onToggleDiscovery);
 
     connect(m_server, &FTPServer::logMessage, this, &ServerWindow::onLogMessage);
     connect(m_server, &FTPServer::clientConnected, this, &ServerWindow::onClientConnected);
@@ -114,12 +122,14 @@ ServerWindow::~ServerWindow() {
     QSettings settings;
     settings.setValue("server/rootPath", m_rootPathEdit->text());
     settings.setValue("server/port", m_portSpin->value());
+    settings.setValue("server/discoveryEnabled", m_discoveryCheck->isChecked());
 }
 
 void ServerWindow::loadSettings() {
     QSettings settings;
     m_rootPathEdit->setText(settings.value("server/rootPath", m_server->rootPath()).toString());
     m_portSpin->setValue(settings.value("server/port", FTP::DEFAULT_PORT).toInt());
+    m_discoveryCheck->setChecked(settings.value("server/discoveryEnabled", false).toBool());
 
     const int count = settings.beginReadArray("server/users");
     for (int i = 0; i < count; ++i) {
@@ -177,8 +187,19 @@ void ServerWindow::onToggleServer() {
         m_startStopButton->setText(QStringLiteral("停止服务"));
         m_rootPathEdit->setEnabled(false);
         m_portSpin->setEnabled(false);
+        // 服务刚启动、有端口可广播了,如果勾选框本来就是勾上的(比如上次关闭时就
+        // 是勾着的),现在把广播实际开起来——stop() 那边已经会在停服务时把广播
+        // 一起停掉,这里只需要处理"重新启动服务后要不要恢复广播"这一侧。
+        if (m_discoveryCheck->isChecked()) {
+            m_server->setDiscoveryEnabled(true, QHostInfo::localHostName());
+        }
     }
     updateStatusLabel();
+}
+
+void ServerWindow::onToggleDiscovery() {
+    if (!m_server->isRunning()) return; // 服务没运行,没有端口可广播,勾选框状态先记着就行
+    m_server->setDiscoveryEnabled(m_discoveryCheck->isChecked(), QHostInfo::localHostName());
 }
 
 void ServerWindow::onAddUser() {

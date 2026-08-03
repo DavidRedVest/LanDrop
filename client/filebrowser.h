@@ -6,7 +6,7 @@
 #include <QList>
 #include <QDateTime>
 
-#include "../common/protocol.h"
+#include "../common/ftptypes.h"
 
 class QLineEdit;
 class QPushButton;

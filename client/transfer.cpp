@@ -1,443 +1,122 @@
 #include "transfer.h"
-#include "connection.h"
 #include "../common/utils.h"
+#include "../core/ftp/ftp_transfer_manager.h"
 
-#include <QTcpSocket>
-#include <QFile>
-#include <QFileInfo>
-#include <QDir>
-#include <QUuid>
-#include <QTimer>
 #include <QDateTime>
-#include <memory>
+#include <QDir>
+#include <QFileInfo>
+#include <QMetaObject>
 
-using FTP::Command;
-using FTP::Packet;
+TransferQueue::TransferQueue(QObject* parent) : QAbstractTableModel(parent) {}
 
-// 单个数据通道连接的生命周期:认领 token 后发送/接收 TRANSFER_DATA,直到
-// TRANSFER_DONE。不依赖 TransferQueue 的内部状态,只通过信号汇报结果。
-// 注意:不能放进匿名 namespace——transfer.h 里 `class ClientTransferWorker;`
-// 是在全局命名空间的前向声明,匿名 namespace 会产生一个不同的类型,导致
-// TransferQueue 头文件里 QMap<QString, ClientTransferWorker*> 类型不匹配。
-class ClientTransferWorker : public QObject {
-    Q_OBJECT
+// 必须在 .cpp 里定义(即使是默认行为),即使不显式写内容——因为 m_ftpManager 是
+// unique_ptr<core::FtpTransferManager>,而 transfer.h 里只前向声明了这个类型,
+// 编译器生成隐式析构函数需要在"能看到完整类型定义"的地方生成,不能留给
+// 只包含 transfer.h、看不到 core/ftp/ftp_transfer_manager.h 完整定义的其它 .cpp
+// (比如 mainwindow.cpp)去隐式生成。
+TransferQueue::~TransferQueue() = default;
 
-public:
-    ClientTransferWorker(const QString& host, quint16 port, const QString& token,
-                          TransferTask::Direction direction, const QString& localPath,
-                          qint64 resumeOffset, QObject* parent = nullptr)
-        : QObject(parent)
-        , m_socket(new QTcpSocket(this))
-        , m_direction(direction)
-        , m_localPath(localPath)
-        , m_resumeOffset(resumeOffset)
-        , m_token(token)
-    {
-        connect(m_socket, &QTcpSocket::connected, this, &ClientTransferWorker::onConnected);
-        connect(m_socket, &QTcpSocket::readyRead, this, &ClientTransferWorker::onReadyRead);
-        connect(m_socket, &QTcpSocket::disconnected, this, &ClientTransferWorker::onDisconnected);
-        connect(m_socket, &QTcpSocket::bytesWritten, this, &ClientTransferWorker::onBytesWritten);
-        m_socket->connectToHost(host, port);
-    }
+void TransferQueue::setConnectionInfo(const QString& host, quint16 port, const QString& username,
+                                       const QString& password) {
+    if (m_ftpManager) m_ftpManager->stop(); // 重新连接/换站点:先干净停掉旧的连接池
 
-    // hardCancel=false 表示暂停(本地部分文件保留,之后可续传);
-    // hardCancel=true 表示彻底取消(同样保留部分文件,但不会自动重试)
-    void cancel(bool hardCancel) {
-        if (m_finished) return;
-        m_cancelled = true;
-        m_hardCancel = hardCancel;
-        m_socket->disconnectFromHost();
-        if (m_socket->state() != QAbstractSocket::UnconnectedState) {
-            m_socket->abort();
+    m_ftpManager.reset(new core::FtpTransferManager(host.toStdString(), port, username.toStdString(),
+                                                      password.toStdString(), m_maxConcurrent));
+
+    m_ftpManager->setProgressCallback([this](const std::string& id, uint64_t bytesTransferred) {
+        const QString taskId = QString::fromStdString(id);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        {
+            std::lock_guard<std::mutex> lock(m_progressThrottleMutex);
+            auto it = m_lastProgressReportMsec.find(taskId);
+            if (it != m_lastProgressReportMsec.end() && now - it->second < 200) return;
+            m_lastProgressReportMsec[taskId] = now;
         }
-    }
+        QMetaObject::invokeMethod(
+            this, [this, taskId, bytesTransferred] { applyProgress(taskId, static_cast<qint64>(bytesTransferred)); },
+            Qt::QueuedConnection);
+    });
 
-signals:
-    void progress(qint64 bytesTransferred);
-    void finished(TransferOutcome outcome, const QString& message);
+    m_ftpManager->setStateCallback(
+        [this](const std::string& id, core::FtpTaskState state, const std::string& message) {
+            const QString taskId = QString::fromStdString(id);
+            const QString msg = QString::fromStdString(message);
+            QMetaObject::invokeMethod(
+                this, [this, taskId, state, msg] { applyStateChange(taskId, state, msg); }, Qt::QueuedConnection);
+        });
 
-private slots:
-    void onConnected() {
-        Packet authPacket(Command::DATA_CHANNEL_AUTH);
-        QDataStream out(&authPacket.payload, QIODevice::WriteOnly);
-        out.setVersion(QDataStream::Qt_6_0);
-        out << m_token;
-        FTP::writeFramedPacket(m_socket, authPacket);
-
-        if (m_direction == TransferTask::Direction::Upload) {
-            m_file = std::make_unique<QFile>(m_localPath);
-            if (!m_file->open(QIODevice::ReadOnly) || (m_resumeOffset > 0 && !m_file->seek(m_resumeOffset))) {
-                finishWith(TransferOutcome::Error, QStringLiteral("无法打开本地文件"));
-                return;
-            }
-            sendNextChunk();
-        } else {
-            QDir().mkpath(QFileInfo(m_localPath).absolutePath());
-            m_file = std::make_unique<QFile>(m_localPath);
-            const QIODevice::OpenMode mode = (m_resumeOffset > 0)
-                                                  ? QIODevice::ReadWrite
-                                                  : (QIODevice::WriteOnly | QIODevice::Truncate);
-            if (!m_file->open(mode) || (m_resumeOffset > 0 && !m_file->seek(m_resumeOffset))) {
-                finishWith(TransferOutcome::Error, QStringLiteral("无法创建本地文件"));
-                return;
-            }
-        }
-    }
-
-    void onReadyRead() {
-        m_framer.feed(m_socket->readAll());
-        while (m_framer.hasPacket()) {
-            handlePacket(m_framer.takePacket());
-        }
-    }
-
-    void onDisconnected() {
-        if (m_finished) return;
-        if (m_cancelled) {
-            finishWith(m_hardCancel ? TransferOutcome::Cancelled : TransferOutcome::Paused, QString());
-        } else {
-            finishWith(TransferOutcome::Error, QStringLiteral("连接断开"));
-        }
-    }
-
-    void onBytesWritten(qint64) {
-        if (m_direction == TransferTask::Direction::Upload && m_file && m_file->isOpen() && m_socket->bytesToWrite() == 0) {
-            sendNextChunk();
-        }
-    }
-
-private:
-    void handlePacket(const Packet& packet) {
-        switch (packet.command) {
-        case Command::TRANSFER_DATA: {
-            if (m_direction != TransferTask::Direction::Download) return;
-            quint64 offset = 0;
-            QByteArray data;
-            if (!Packet::parseDataPacket(packet.payload, offset, data)) return;
-            m_file->seek(static_cast<qint64>(offset));
-            m_file->write(data);
-            m_bytesThisSession = static_cast<qint64>(offset) + data.size() - m_resumeOffset;
-            emit progress(m_resumeOffset + m_bytesThisSession);
-            break;
-        }
-        case Command::TRANSFER_DONE: {
-            if (m_direction != TransferTask::Direction::Download) return;
-            m_file->flush();
-            m_file->close();
-            const QByteArray actualHash = FTP::Utils::fileHash(m_localPath);
-            if (actualHash == packet.payload) {
-                finishWith(TransferOutcome::Success, QString());
-            } else {
-                QFile::remove(m_localPath); // 校验失败,强制下次从头重传
-                finishWith(TransferOutcome::Error, QStringLiteral("校验失败"));
-            }
-            m_socket->disconnectFromHost();
-            break;
-        }
-        case Command::SUCCESS:
-            if (m_direction == TransferTask::Direction::Upload) {
-                finishWith(TransferOutcome::Success, QString());
-                m_socket->disconnectFromHost();
-            }
-            break;
-        case Command::TRANSFER_ERROR:
-            if (m_direction == TransferTask::Direction::Upload) {
-                finishWith(TransferOutcome::Error, QString::fromUtf8(packet.payload));
-                m_socket->disconnectFromHost();
-            }
-            break;
-        default:
-            break;
-        }
-    }
-
-    void sendNextChunk() {
-        if (!m_file) return;
-        const QByteArray chunk = m_file->read(FTP::BLOCK_SIZE);
-        if (chunk.isEmpty() && m_file->atEnd()) {
-            m_file->close();
-            m_file.reset(); // 防止 TRANSFER_DONE flush 后残留的 bytesWritten 信号重新调用 sendNextChunk() 读已关闭的文件
-            const QByteArray hash = FTP::Utils::fileHash(m_localPath);
-            Packet donePacket(Command::TRANSFER_DONE);
-            donePacket.payload = hash;
-            FTP::writeFramedPacket(m_socket, donePacket);
-            // 等待服务端 SUCCESS/TRANSFER_ERROR 回执,见 handlePacket
-            return;
-        }
-        const qint64 chunkOffset = m_resumeOffset + m_bytesThisSession;
-        m_bytesThisSession += chunk.size();
-        Packet dataPacket(Command::TRANSFER_DATA);
-        dataPacket.payload = Packet::createDataPacket(static_cast<quint64>(chunkOffset), chunk);
-        FTP::writeFramedPacket(m_socket, dataPacket);
-        emit progress(chunkOffset + chunk.size());
-    }
-
-    void finishWith(TransferOutcome outcome, const QString& message) {
-        if (m_finished) return;
-        m_finished = true;
-        if (m_file && m_file->isOpen()) m_file->close();
-        emit finished(outcome, message);
-    }
-
-    QTcpSocket* m_socket;
-    FTP::PacketFramer m_framer;
-    TransferTask::Direction m_direction;
-    QString m_localPath;
-    qint64 m_resumeOffset;
-    QString m_token;
-
-    std::unique_ptr<QFile> m_file;
-    qint64 m_bytesThisSession = 0;
-    bool m_cancelled = false;
-    bool m_hardCancel = false;
-    bool m_finished = false;
-};
-
-TransferQueue::TransferQueue(Connection* connection, QObject* parent)
-    : QAbstractTableModel(parent)
-    , m_connection(connection)
-{
-    connect(m_connection, &Connection::transferReady, this, &TransferQueue::onTransferReady);
+    m_ftpManager->start();
 }
 
 void TransferQueue::enqueueUpload(const QString& localPath, const QString& remoteDir) {
+    if (!m_ftpManager) return;
     const QFileInfo info(localPath);
     if (!info.exists() || !info.isFile()) return;
 
+    const QString remotePath = (remoteDir == "/" ? "/" : remoteDir + "/") + info.fileName();
+    const std::string coreId = m_ftpManager->enqueueUpload(localPath.toStdString(), remotePath.toStdString(),
+                                                             static_cast<uint64_t>(info.size()));
+
     TransferTask task;
-    task.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    task.id = QString::fromStdString(coreId);
     task.direction = TransferTask::Direction::Upload;
     task.localPath = localPath;
-    task.remotePath = (remoteDir == "/" ? "/" : remoteDir + "/") + info.fileName();
+    task.remotePath = remotePath;
     task.totalSize = info.size();
 
     beginInsertRows(QModelIndex(), m_tasks.size(), m_tasks.size());
     m_tasks.append(task);
     endInsertRows();
-    startNextIfPossible();
 }
 
 void TransferQueue::enqueueDownload(const QString& remotePath, const QString& localDir, qint64 remoteSize) {
+    if (!m_ftpManager) return;
+    const QString fileName = remotePath.section('/', -1);
+    const QString localPath = QDir(localDir).filePath(fileName);
+
+    const std::string coreId = m_ftpManager->enqueueDownload(remotePath.toStdString(), localPath.toStdString(),
+                                                               static_cast<uint64_t>(remoteSize));
+
     TransferTask task;
-    task.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    task.id = QString::fromStdString(coreId);
     task.direction = TransferTask::Direction::Download;
     task.remotePath = remotePath;
-    const QString fileName = remotePath.section('/', -1);
-    task.localPath = QDir(localDir).filePath(fileName);
+    task.localPath = localPath;
     task.totalSize = remoteSize;
 
     beginInsertRows(QModelIndex(), m_tasks.size(), m_tasks.size());
     m_tasks.append(task);
     endInsertRows();
-    startNextIfPossible();
-}
-
-void TransferQueue::startNextIfPossible() {
-    if (!m_pendingRequestTaskId.isEmpty()) return;
-    if (m_activeCount >= m_maxConcurrent) return;
-    for (int i = 0; i < m_tasks.size(); ++i) {
-        if (m_tasks[i].state == TransferTask::State::Queued) {
-            startTask(i);
-            return;
-        }
-    }
-}
-
-void TransferQueue::startTask(int row) {
-    TransferTask& task = m_tasks[row];
-    task.state = TransferTask::State::Requesting;
-    m_pendingRequestTaskId = task.id;
-    updateRow(row);
-
-    if (task.direction == TransferTask::Direction::Upload) {
-        m_connection->requestUpload(task.remotePath, task.totalSize);
-    } else {
-        const QFileInfo localInfo(task.localPath);
-        const qint64 localExisting = localInfo.exists() ? localInfo.size() : 0;
-        m_connection->requestDownload(task.remotePath, localExisting);
-    }
-}
-
-void TransferQueue::onTransferReady(bool success, const QString& message, const QString& token, qint64 resumeOffset) {
-    const int row = rowForId(m_pendingRequestTaskId);
-    m_pendingRequestTaskId.clear();
-    if (row < 0) {
-        startNextIfPossible();
-        return;
-    }
-
-    TransferTask& task = m_tasks[row];
-    if (!success) {
-        task.state = TransferTask::State::Failed;
-        task.statusMessage = message;
-        updateRow(row);
-        startNextIfPossible();
-        return;
-    }
-
-    task.bytesTransferred = resumeOffset;
-    task.lastSpeedSampleBytes = resumeOffset;
-    task.lastSpeedSampleMsec = QDateTime::currentMSecsSinceEpoch();
-    task.state = TransferTask::State::Transferring;
-    updateRow(row);
-    ++m_activeCount;
-
-    auto* worker = new ClientTransferWorker(m_connection->host(), m_connection->dataPort(), token,
-                                             task.direction, task.localPath, resumeOffset, this);
-    m_workers.insert(task.id, worker);
-    const QString taskId = task.id;
-    connect(worker, &ClientTransferWorker::progress, this, [this, taskId](qint64 bytesTransferred) {
-        const int r = rowForId(taskId);
-        if (r >= 0) onWorkerProgress(r, bytesTransferred);
-    });
-    connect(worker, &ClientTransferWorker::finished, this, [this, taskId](TransferOutcome outcome, const QString& msg) {
-        const int r = rowForId(taskId);
-        if (r >= 0) onWorkerFinished(r, outcome, msg);
-    });
-
-    startNextIfPossible();
-}
-
-void TransferQueue::onWorkerProgress(int row, qint64 bytesTransferred) {
-    // Worker emits this once per BLOCK_SIZE chunk (e.g. every 256KB) — for a large
-    // file that can be tens of thousands of signals per transfer. Previously every
-    // single one triggered updateRow() -> dataChanged() -> a table repaint, which at
-    // that frequency flooded the main-thread event queue badly enough to (a) delay
-    // Connection's heartbeat PING/PONG processing past the timeout, causing a spurious
-    // "心跳超时" disconnect on large transfers, and (b) produce visible rendering
-    // glitches in the view (progress bar appearing to paint into a neighboring
-    // column) under the repaint storm. Keep the byte counter always current (cheap),
-    // but only push a UI update a few times a second.
-    TransferTask& task = m_tasks[row];
-    task.bytesTransferred = bytesTransferred;
-
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (task.lastSpeedSampleMsec == 0) {
-        task.lastSpeedSampleMsec = now;
-        task.lastSpeedSampleBytes = bytesTransferred;
-        updateRow(row);
-        return;
-    }
-
-    const qint64 elapsedMs = now - task.lastSpeedSampleMsec;
-    if (elapsedMs < 200) {
-        return;
-    }
-    const qint64 deltaBytes = bytesTransferred - task.lastSpeedSampleBytes;
-    task.bytesPerSecond = elapsedMs > 0 ? (deltaBytes * 1000 / elapsedMs) : 0;
-    task.lastSpeedSampleMsec = now;
-    task.lastSpeedSampleBytes = bytesTransferred;
-    updateRow(row);
-}
-
-void TransferQueue::onWorkerFinished(int row, TransferOutcome outcome, const QString& message) {
-    TransferTask& task = m_tasks[row];
-    if (ClientTransferWorker* worker = m_workers.take(task.id)) {
-        worker->deleteLater();
-    }
-    --m_activeCount;
-
-    switch (outcome) {
-    case TransferOutcome::Success:
-        task.state = TransferTask::State::Completed;
-        task.bytesTransferred = task.totalSize;
-        task.statusMessage.clear();
-        task.retryCount = 0;
-        break;
-    case TransferOutcome::Paused:
-        task.state = TransferTask::State::Paused;
-        task.statusMessage = QStringLiteral("已暂停");
-        break;
-    case TransferOutcome::Cancelled:
-        task.state = TransferTask::State::Cancelled;
-        task.statusMessage = QStringLiteral("已取消");
-        break;
-    case TransferOutcome::Error:
-        ++task.retryCount;
-        task.state = TransferTask::State::Failed;
-        if (task.retryCount <= 3) {
-            task.statusMessage = QStringLiteral("%1(将自动重试,第 %2 次)").arg(message).arg(task.retryCount);
-            scheduleRetry(row);
-        } else {
-            task.statusMessage = message;
-        }
-        break;
-    }
-
-    updateRow(row);
-    startNextIfPossible();
-}
-
-void TransferQueue::scheduleRetry(int row) {
-    const QString taskId = m_tasks[row].id;
-    const int delayMs = qMin(m_tasks[row].retryCount, 5) * 2000;
-    QTimer::singleShot(delayMs, this, [this, taskId] {
-        const int r = rowForId(taskId);
-        if (r < 0) return;
-        if (m_tasks[r].state != TransferTask::State::Failed) return; // 用户可能已手动取消/移除
-        m_tasks[r].state = TransferTask::State::Queued;
-        updateRow(r);
-        startNextIfPossible();
-    });
 }
 
 void TransferQueue::pauseRow(int row) {
-    if (row < 0 || row >= m_tasks.size()) return;
-    TransferTask& task = m_tasks[row];
-    if (ClientTransferWorker* worker = m_workers.value(task.id)) {
-        worker->cancel(false);
-    } else if (task.state == TransferTask::State::Queued) {
-        task.state = TransferTask::State::Paused;
-        task.statusMessage = QStringLiteral("已暂停");
-        updateRow(row);
-    }
+    if (row < 0 || row >= m_tasks.size() || !m_ftpManager) return;
+    m_ftpManager->pauseTask(m_tasks[row].id.toStdString());
 }
 
 void TransferQueue::resumeRow(int row) {
-    if (row < 0 || row >= m_tasks.size()) return;
-    TransferTask& task = m_tasks[row];
-    if (task.state == TransferTask::State::Paused || task.state == TransferTask::State::Failed ||
-        task.state == TransferTask::State::Cancelled) {
-        task.state = TransferTask::State::Queued;
-        task.retryCount = 0;
-        task.statusMessage.clear();
-        updateRow(row);
-        startNextIfPossible();
-    }
+    if (row < 0 || row >= m_tasks.size() || !m_ftpManager) return;
+    m_ftpManager->resumeTask(m_tasks[row].id.toStdString());
 }
 
 void TransferQueue::cancelRow(int row) {
-    if (row < 0 || row >= m_tasks.size()) return;
-    TransferTask& task = m_tasks[row];
-    if (ClientTransferWorker* worker = m_workers.value(task.id)) {
-        worker->cancel(true);
-    } else if (task.state == TransferTask::State::Queued || task.state == TransferTask::State::Paused ||
-               task.state == TransferTask::State::Failed) {
-        task.state = TransferTask::State::Cancelled;
-        task.statusMessage = QStringLiteral("已取消");
-        updateRow(row);
-    }
+    if (row < 0 || row >= m_tasks.size() || !m_ftpManager) return;
+    m_ftpManager->cancelTask(m_tasks[row].id.toStdString());
 }
 
 void TransferQueue::removeRow(int row) {
     if (row < 0 || row >= m_tasks.size()) return;
-    const QString id = m_tasks[row].id;
-    if (ClientTransferWorker* worker = m_workers.take(id)) {
-        worker->disconnect(this);
-        worker->cancel(true);
-        worker->deleteLater();
-        --m_activeCount;
-    }
+    if (m_ftpManager) m_ftpManager->removeTask(m_tasks[row].id.toStdString());
     beginRemoveRows(QModelIndex(), row, row);
     m_tasks.removeAt(row);
     endRemoveRows();
-    startNextIfPossible();
 }
 
 void TransferQueue::clearFinished() {
     for (int i = m_tasks.size() - 1; i >= 0; --i) {
         const TransferTask::State state = m_tasks[i].state;
         if (state == TransferTask::State::Completed || state == TransferTask::State::Cancelled) {
+            if (m_ftpManager) m_ftpManager->removeTask(m_tasks[i].id.toStdString());
             beginRemoveRows(QModelIndex(), i, i);
             m_tasks.removeAt(i);
             endRemoveRows();
@@ -454,6 +133,68 @@ int TransferQueue::rowForId(const QString& id) const {
 
 void TransferQueue::updateRow(int row) {
     emit dataChanged(index(row, 0), index(row, ColumnCount - 1));
+}
+
+void TransferQueue::applyProgress(const QString& id, qint64 bytesTransferred) {
+    const int row = rowForId(id);
+    if (row < 0) return;
+    TransferTask& task = m_tasks[row];
+    task.bytesTransferred = bytesTransferred;
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (task.lastSpeedSampleMsec == 0) {
+        task.lastSpeedSampleMsec = now;
+        task.lastSpeedSampleBytes = bytesTransferred;
+        updateRow(row);
+        return;
+    }
+    const qint64 elapsedMs = now - task.lastSpeedSampleMsec;
+    if (elapsedMs <= 0) {
+        updateRow(row);
+        return;
+    }
+    const qint64 deltaBytes = bytesTransferred - task.lastSpeedSampleBytes;
+    task.bytesPerSecond = deltaBytes * 1000 / elapsedMs;
+    task.lastSpeedSampleMsec = now;
+    task.lastSpeedSampleBytes = bytesTransferred;
+    updateRow(row);
+}
+
+void TransferQueue::applyStateChange(const QString& id, core::FtpTaskState state, const QString& message) {
+    const int row = rowForId(id);
+    if (row < 0) return;
+    TransferTask& task = m_tasks[row];
+
+    switch (state) {
+    case core::FtpTaskState::Queued:
+        task.state = TransferTask::State::Queued;
+        task.statusMessage.clear();
+        break;
+    case core::FtpTaskState::Connecting:
+        task.state = TransferTask::State::Requesting;
+        break;
+    case core::FtpTaskState::Transferring:
+        task.state = TransferTask::State::Transferring;
+        break;
+    case core::FtpTaskState::Completed:
+        task.state = TransferTask::State::Completed;
+        task.bytesTransferred = task.totalSize;
+        task.statusMessage.clear();
+        break;
+    case core::FtpTaskState::Failed:
+        task.state = TransferTask::State::Failed;
+        task.statusMessage = message;
+        break;
+    case core::FtpTaskState::Paused:
+        task.state = TransferTask::State::Paused;
+        task.statusMessage = QStringLiteral("已暂停");
+        break;
+    case core::FtpTaskState::Cancelled:
+        task.state = TransferTask::State::Cancelled;
+        task.statusMessage = QStringLiteral("已取消");
+        break;
+    }
+    updateRow(row);
 }
 
 int TransferQueue::rowCount(const QModelIndex& parent) const {
@@ -518,5 +259,3 @@ QVariant TransferQueue::headerData(int section, Qt::Orientation orientation, int
     default: return {};
     }
 }
-
-#include "transfer.moc"

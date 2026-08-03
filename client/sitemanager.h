@@ -4,12 +4,27 @@
 #include <QString>
 #include <QList>
 
-#include "../common/protocol.h"
+#include "../common/ftptypes.h"
+
+#include <memory>
 
 class QListWidget;
+class QListWidgetItem;
 class QLineEdit;
 class QSpinBox;
 class QCheckBox;
+
+namespace core {
+class DiscoveryListener;
+} // namespace core
+
+// 局域网发现面板展示用的一条记录,和 core::DiscoveredDevice 内容对应但是纯 Qt
+// 类型——sitemanager.h 不该为了这一个小结构体去 #include core/ 的头文件。
+struct DiscoveredDeviceInfo {
+    QString deviceName;
+    QString address;
+    quint16 servicePort = 0;
+};
 
 // 保存的一个站点连接信息(如"Mac"/"Win11")
 struct SiteInfo {
@@ -29,6 +44,7 @@ class SiteManagerDialog : public QDialog {
 
 public:
     explicit SiteManagerDialog(QWidget* parent = nullptr);
+    ~SiteManagerDialog() override;
 
     static QList<SiteInfo> loadSites();
     static void saveSites(const QList<SiteInfo>& sites);
@@ -41,11 +57,15 @@ private slots:
     void onSave();
     void onDelete();
     void onConnect();
+    void onDiscoveredDeviceActivated(QListWidgetItem* item);
 
 private:
     void refreshList();
     void loadFormFromSite(const SiteInfo& site);
     SiteInfo formToSite() const;
+    // 跑在 UI 线程上,由 core::DiscoveryListener 的回调通过
+    // QMetaObject::invokeMethod(..., Qt::QueuedConnection) 调用过来。
+    void applyDiscoveredDevices(const QList<DiscoveredDeviceInfo>& devices);
 
     QList<SiteInfo> m_sites;
     SiteInfo m_selected;
@@ -58,4 +78,10 @@ private:
     QLineEdit* m_usernameEdit;
     QLineEdit* m_passwordEdit;
     QCheckBox* m_rememberCheck;
+
+    // 局域网发现:对话框打开期间自动扫描,双击列表里的一项把地址/端口自动填进
+    // 表单(账号密码仍需手动填,广播包里不带凭据)。关闭对话框时自动停止扫描。
+    QListWidget* m_discoveredListWidget;
+    QList<DiscoveredDeviceInfo> m_discoveredDevices; // 和 m_discoveredListWidget 的行一一对应
+    std::unique_ptr<core::DiscoveryListener> m_discoveryListener;
 };

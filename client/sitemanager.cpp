@@ -1,5 +1,7 @@
 #include "sitemanager.h"
 
+#include "../core/discovery/lan_discovery.h"
+
 #include <QListWidget>
 #include <QLineEdit>
 #include <QSpinBox>
@@ -9,8 +11,10 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDialogButtonBox>
+#include <QGroupBox>
 #include <QSettings>
 #include <QMessageBox>
+#include <QMetaObject>
 
 QList<SiteInfo> SiteManagerDialog::loadSites() {
     QSettings settings;
@@ -59,8 +63,17 @@ SiteManagerDialog::SiteManagerDialog(QWidget* parent)
 
     auto* mainLayout = new QHBoxLayout(this);
 
+    auto* leftLayout = new QVBoxLayout();
     m_listWidget = new QListWidget(this);
-    mainLayout->addWidget(m_listWidget, 1);
+    leftLayout->addWidget(m_listWidget, 1);
+
+    auto* discoveryGroup = new QGroupBox(QStringLiteral("局域网发现(双击填入左侧地址)"), this);
+    auto* discoveryLayout = new QVBoxLayout(discoveryGroup);
+    m_discoveredListWidget = new QListWidget(discoveryGroup);
+    discoveryLayout->addWidget(m_discoveredListWidget);
+    leftLayout->addWidget(discoveryGroup);
+
+    mainLayout->addLayout(leftLayout, 1);
 
     auto* rightLayout = new QVBoxLayout();
     auto* form = new QFormLayout();
@@ -107,11 +120,52 @@ SiteManagerDialog::SiteManagerDialog(QWidget* parent)
     connect(deleteButton, &QPushButton::clicked, this, &SiteManagerDialog::onDelete);
     connect(connectButton, &QPushButton::clicked, this, &SiteManagerDialog::onConnect);
     connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_discoveredListWidget, &QListWidget::itemDoubleClicked, this,
+            &SiteManagerDialog::onDiscoveredDeviceActivated);
 
     refreshList();
     if (!m_sites.isEmpty()) {
         m_listWidget->setCurrentRow(0);
     }
+
+    // 对话框打开期间自动扫描局域网,关闭时（析构函数）自动停止——不需要用户
+    // 额外点一个"开始扫描"按钮,打开这个对话框本身就是想找一台设备连的场景。
+    m_discoveryListener.reset(new core::DiscoveryListener());
+    m_discoveryListener->setUpdateCallback([this](const std::vector<core::DiscoveredDevice>& devices) {
+        QList<DiscoveredDeviceInfo> list;
+        list.reserve(static_cast<int>(devices.size()));
+        for (const auto& d : devices) {
+            DiscoveredDeviceInfo info;
+            info.deviceName = QString::fromStdString(d.deviceName);
+            info.address = QString::fromStdString(d.address);
+            info.servicePort = d.servicePort;
+            list.append(info);
+        }
+        QMetaObject::invokeMethod(this, [this, list] { applyDiscoveredDevices(list); }, Qt::QueuedConnection);
+    });
+    m_discoveryListener->start();
+}
+
+SiteManagerDialog::~SiteManagerDialog() {
+    if (m_discoveryListener) m_discoveryListener->stop();
+}
+
+void SiteManagerDialog::applyDiscoveredDevices(const QList<DiscoveredDeviceInfo>& devices) {
+    m_discoveredDevices = devices;
+    m_discoveredListWidget->clear();
+    for (const DiscoveredDeviceInfo& d : devices) {
+        m_discoveredListWidget->addItem(
+            QStringLiteral("%1 (%2:%3)").arg(d.deviceName, d.address, QString::number(d.servicePort)));
+    }
+}
+
+void SiteManagerDialog::onDiscoveredDeviceActivated(QListWidgetItem* item) {
+    const int row = m_discoveredListWidget->row(item);
+    if (row < 0 || row >= m_discoveredDevices.size()) return;
+    const DiscoveredDeviceInfo& device = m_discoveredDevices[row];
+    m_hostEdit->setText(device.address);
+    m_portSpin->setValue(device.servicePort);
+    if (m_nameEdit->text().isEmpty()) m_nameEdit->setText(device.deviceName);
 }
 
 void SiteManagerDialog::refreshList() {

@@ -77,6 +77,20 @@ add_executable(lan_discovery_test core/tests/lan_discovery_test.cpp)
 target_link_libraries(lan_discovery_test ftpcore)
 set_target_properties(lan_discovery_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 
+# Headless Qt integration test for the Phase G GUI-core wiring — deliberately
+# NOT Qt-free (AUTOMOC stays ON, unlike everything else above): it links the
+# real client/connection.cpp, client/transfer.cpp, server/ftpserver.cpp
+# directly (they have no QWidget dependency) and drives them against a real
+# core::FtpServer over 127.0.0.1, continuing this project's established
+# "headless Qt console program" verification approach (see CLAUDE.md).
+add_executable(gui_core_integration_test
+    tests/gui_core_integration_test.cpp
+    client/connection.cpp
+    client/transfer.cpp
+    server/ftpserver.cpp
+)
+target_link_libraries(gui_core_integration_test common ftpcore Qt6::Core)
+
 # App icon: resources/icons/landrop.png is embedded as a Qt resource and set as
 # the runtime window icon (title bar / dock / taskbar) on every platform.
 # Additionally: on macOS the .icns is bundled as the .app's Finder/Dock icon; on
@@ -105,7 +119,7 @@ add_executable(landrop_server MACOSX_BUNDLE WIN32
     ${ICON_SOURCES}
 )
 
-target_link_libraries(landrop_server common Qt6::Core Qt6::Network Qt6::Widgets)
+target_link_libraries(landrop_server common ftpcore Qt6::Core Qt6::Network Qt6::Widgets)
 
 # Client executable
 add_executable(landrop_client MACOSX_BUNDLE WIN32
@@ -120,7 +134,7 @@ add_executable(landrop_client MACOSX_BUNDLE WIN32
     ${ICON_SOURCES}
 )
 
-target_link_libraries(landrop_client common Qt6::Core Qt6::Network Qt6::Widgets)
+target_link_libraries(landrop_client common ftpcore Qt6::Core Qt6::Network Qt6::Widgets)
 
 if(APPLE)
     set_target_properties(landrop_server landrop_client PROPERTIES

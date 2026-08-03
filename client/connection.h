@@ -3,29 +3,46 @@
 #include <QObject>
 #include <QString>
 #include <QList>
-#include <QAbstractSocket>
 
-#include "../common/protocol.h"
+#include "../common/ftptypes.h"
 
-class QTcpSocket;
-class QTimer;
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
 
-// 客户端控制通道:登录、浏览、文件管理、发起传输请求。
-// 所有操作都是异步的,结果通过信号通知;真正的文件字节收发由
-// TransferQueue 在收到 transferReady 后另开一条数据连接完成。
+namespace core {
+class FtpClient;
+}
+
+// 客户端控制通道:登录、浏览、文件管理。内部包一条独立 std::thread,顺序执行
+// 一个任务队列,每个任务对这条线程私有的 core::FtpClient 做一次同步阻塞调用,
+// 结果通过 QMetaObject::invokeMethod(..., Qt::QueuedConnection) 安全地跨线程
+// 转发成 Qt 信号——公开接口(方法名/信号)和旧的自定义协议实现完全一致,调用方
+// (MainWindow/FileBrowserPanel)不需要改。
+//
+// 传输本身(上传/下载)不再经过这条控制通道:标准 FTP 一条控制连接同一时刻只能
+// 做一件事,并发传输需要独立的 FTP 会话,由 TransferQueue 自己的
+// core::FtpTransferManager 连接池负责,不再需要这里的"申请传输令牌"握手,所以
+// 旧版本的 requestUpload/requestDownload/cancelTransfer/transferReady/dataPort()
+// 在这次重写里被移除——已确认除了旧版 TransferQueue 之外没有别的调用方。
+// changeDir()/directoryChanged 信号同样被移除:确认过旧代码里也从未被真正调用过
+// (GUI 从来没有连接过 directoryChanged),不是这次重写才产生的死代码。
 class Connection : public QObject {
     Q_OBJECT
 
 public:
     explicit Connection(QObject* parent = nullptr);
+    ~Connection() override;
 
     void connectToHost(const QString& host, quint16 port = FTP::DEFAULT_PORT);
     void disconnectFromHost();
-    bool isConnected() const;
+    bool isConnected() const { return m_connected.load(); }
 
     QString host() const { return m_host; }
     quint16 controlPort() const { return m_port; }
-    quint16 dataPort() const { return static_cast<quint16>(m_port + 1); }
 
     void login(const QString& username, const QString& password);
     void listDirectory(const QString& path);
@@ -33,11 +50,6 @@ public:
     void rmdir(const QString& path);
     void deleteFile(const QString& path);
     void rename(const QString& oldPath, const QString& newPath);
-    void changeDir(const QString& path);
-
-    void requestUpload(const QString& path, qint64 fileSize);
-    void requestDownload(const QString& path, qint64 localExistingSize);
-    void cancelTransfer(const QString& token);
 
 signals:
     void connected();
@@ -46,24 +58,20 @@ signals:
     void loginResult(bool success, const QString& message);
     void directoryListed(bool success, const QString& path, const QString& message, const QList<FTP::FileInfo>& list);
     void operationResult(bool success, const QString& message);
-    void directoryChanged(bool success, const QString& canonicalPath, const QString& message);
-    void transferReady(bool success, const QString& message, const QString& token, qint64 resumeOffset);
-
-private slots:
-    void onSocketConnected();
-    void onSocketDisconnected();
-    void onSocketError(QAbstractSocket::SocketError error);
-    void onReadyRead();
-    void onHeartbeatTimeout();
 
 private:
-    void handlePacket(const FTP::Packet& packet);
-    void sendPacket(const FTP::Packet& packet);
+    using Job = std::function<void(core::FtpClient&)>;
 
-    QTcpSocket* m_socket;
-    FTP::PacketFramer m_framer;
+    void threadMain();
+    void pushJob(Job job);
+
     QString m_host;
     quint16 m_port = FTP::DEFAULT_PORT;
-    QTimer* m_heartbeatTimer;
-    bool m_pongPending = false;
+    std::atomic<bool> m_connected{false};
+
+    std::thread m_thread;
+    std::mutex m_queueMutex;
+    std::condition_variable m_queueCv;
+    std::deque<Job> m_jobs;
+    std::atomic<bool> m_stopRequested{false};
 };

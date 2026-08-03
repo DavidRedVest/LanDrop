@@ -20,7 +20,7 @@
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , m_connection(new Connection(this))
-    , m_transferQueue(new TransferQueue(m_connection, this))
+    , m_transferQueue(new TransferQueue(this))
 {
     setWindowTitle(QStringLiteral("LanDrop 客户端"));
     resize(1100, 700);
@@ -136,6 +136,10 @@ void MainWindow::onLoginResult(bool success, const QString& message) {
     }
     m_statusLabel->setText(QStringLiteral("已连接: %1@%2").arg(m_pendingUsername, m_connection->host()));
     setConnectedUiState(true);
+    // 传输队列不再借用 Connection 的控制通道申请令牌,它自己维护一个独立的 FTP
+    // 连接池,需要单独告诉它连去哪、用什么账号——见 client/transfer.h 的说明。
+    m_transferQueue->setConnectionInfo(m_connection->host(), m_connection->controlPort(), m_pendingUsername,
+                                        m_pendingPassword);
     m_remotePanel->navigateTo("/");
 }
 
