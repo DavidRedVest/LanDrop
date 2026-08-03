@@ -12,7 +12,6 @@ find_package(Qt6 REQUIRED COMPONENTS Core Network Widgets)
 
 # Common library
 add_library(common STATIC
-    common/protocol.cpp
     common/utils.cpp
 )
 
@@ -111,9 +110,6 @@ endif()
 add_executable(landrop_server MACOSX_BUNDLE WIN32
     server/main.cpp
     server/ftpserver.cpp
-    server/session.cpp
-    server/filemanager.cpp
-    server/datachannelserver.cpp
     server/serverwindow.cpp
     resources/landrop.qrc
     ${ICON_SOURCES}

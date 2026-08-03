@@ -165,6 +165,84 @@ int main(int argc, char** argv) {
     check(sha256OfFile(downloadedPath) == srcHash,
           "downloaded file content matches original source byte-for-byte (SHA-256)");
 
+    // ---- 暂停/续传/取消:通过 TransferQueue 这一层(pauseRow/resumeRow/cancelRow),
+    // 不是直接调 FtpTransferManager——阶段 E 已经在 core 层面验证过暂停续传机制
+    // 本身是对的,这里要确认的是 Qt 适配层(行号查找、状态回调映射)接得对。----
+    const QString pauseSrc = QDir::tempPath() + "/landrop_gui_integration_pause_src.bin";
+    {
+        QFile f(pauseSrc);
+        check(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "create local pause-test source file");
+        QByteArray data;
+        data.resize(100 * 1024 * 1024); // 100MB:确保在 200ms 节流窗口内不会瞬间传完
+        for (int i = 0; i < data.size(); ++i) data[i] = static_cast<char>((i * 5 + 3) % 251);
+        f.write(data);
+    }
+    const QByteArray pauseSrcHash = sha256OfFile(pauseSrc);
+
+    queue.enqueueUpload(pauseSrc, "/");
+    const int pauseRow = queue.rowCount() - 1;
+    check(pauseRow >= 0, "pause-test task got a row in the model");
+
+    check(waitUntil(
+              [&] { return queue.data(queue.index(pauseRow, 0), TransferQueue::BytesTransferredRole).toLongLong() > 0; },
+              5000),
+          "pause-test upload starts actually transferring bytes (bytesTransferred > 0)");
+
+    queue.pauseRow(pauseRow);
+    const bool reachedPaused = waitUntil(
+        [&] {
+            return queue.data(queue.index(pauseRow, 0), TransferQueue::StateRole).toInt() ==
+                   static_cast<int>(TransferTask::State::Paused);
+        },
+        5000);
+    const qint64 stateAfterPauseAttempt = queue.data(queue.index(pauseRow, 0), TransferQueue::StateRole).toInt();
+    // 极端情况下(比如这台机器的回环速度快到 100MB 在节流窗口内就传完了),pauseRow()
+    // 可能"扑了个空"——任务已经是 Completed 了,这不是 bug,只是没抓住暂停窗口。
+    // 只有当它既没到 Paused、也没到 Completed 时才是真的有问题。
+    check(reachedPaused || stateAfterPauseAttempt == static_cast<int>(TransferTask::State::Completed),
+          "pauseRow() either paused the task or it had already completed (not stuck in another state)");
+
+    if (reachedPaused) {
+        const qint64 bytesAtPause =
+            queue.data(queue.index(pauseRow, 0), TransferQueue::BytesTransferredRole).toLongLong();
+        check(bytesAtPause > 0 && bytesAtPause < 100 * 1024 * 1024,
+              "paused task has partial bytesTransferred (got " + QString::number(bytesAtPause) + ")");
+
+        queue.resumeRow(pauseRow);
+        check(waitUntil(
+                  [&] {
+                      return queue.data(queue.index(pauseRow, 0), TransferQueue::StateRole).toInt() ==
+                             static_cast<int>(TransferTask::State::Completed);
+                  },
+                  20000),
+              "resumeRow() lets the task reach Completed");
+
+        const QString pauseServerPath = serverRoot + "/landrop_gui_integration_pause_src.bin";
+        check(sha256OfFile(pauseServerPath) == pauseSrcHash,
+              "resumed upload's final content matches original source byte-for-byte (SHA-256)");
+    }
+
+    // 取消一个还在排队、尚未被任何 worker 处理的任务——确定性分支,不涉及网络时序。
+    const QString cancelSrc = QDir::tempPath() + "/landrop_gui_integration_cancel_src.bin";
+    {
+        QFile f(cancelSrc);
+        f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        f.write(QByteArray(1024, 'x'));
+    }
+    queue.enqueueUpload(cancelSrc, "/");
+    const int cancelRow = queue.rowCount() - 1;
+    queue.cancelRow(cancelRow);
+    check(waitUntil(
+              [&] {
+                  return queue.data(queue.index(cancelRow, 0), TransferQueue::StateRole).toInt() ==
+                         static_cast<int>(TransferTask::State::Cancelled);
+              },
+              5000),
+          "cancelRow() transitions the task to Cancelled");
+
+    QFile::remove(pauseSrc);
+    QFile::remove(cancelSrc);
+
     connection.disconnectFromHost();
     server.stop();
     check(!server.isRunning(), "FTPServer::stop() actually stops the server");
