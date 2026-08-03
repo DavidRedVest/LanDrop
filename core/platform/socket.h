@@ -8,6 +8,20 @@
 #include <string>
 
 #ifdef _WIN32
+// windows.h(被 winsock2.h 间接拉进来)默认会定义 min/max 宏,和 <algorithm> 里的
+// std::min/std::max 撞名——任何 core/ 下的代码只要写 std::min(...)/std::max(...),
+// 在 Windows 上不定义 NOMINMAX 就会被预处理器错误展开,产生 "illegal token on
+// right side of '::'" 这种看起来毫不相关的编译错误(真实在 Windows CI 上炸过一次:
+// core/ftp/ftp_transfer_manager.cpp 里 std::min(retryCount, kMaxRetryBackoffSteps)
+// 编译失败,macOS/Linux 上完全不会复现,因为它们不会拉进 windows.h)。这里是整个
+// core/ 唯一会 #include <winsock2.h> 的地方(其余文件都通过包含这个头间接引入),
+// 在这里统一定义一次,不需要每个用到 std::min/max 的文件都各自小心。
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
