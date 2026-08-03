@@ -59,9 +59,14 @@ public:
 
 signals:
     void pathChanged(const QString& path);
-    void uploadRequested(const QStringList& localAbsolutePaths); // 仅 Local 面板发出
+    void uploadRequested(const QStringList& localAbsolutePaths); // 仅 Local 面板发出,只含文件
     // 仅 Remote 面板发出;每项为 {远程完整路径, 文件大小},下载进度条需要用到大小
     void downloadRequested(const QList<QPair<QString, qint64>>& remoteFiles);
+    // 选中项里的文件夹分别走这两个信号(仅 Local/Remote 面板对应发出)——文件夹需要
+    // 先递归建目录/递归列目录,不能像普通文件那样直接丢进 TransferQueue,所以和
+    // uploadRequested/downloadRequested 分开,由 MainWindow 单独处理。
+    void folderUploadRequested(const QStringList& localFolderPaths);
+    void folderDownloadRequested(const QStringList& remoteFolderPaths);
     void statusMessage(const QString& message);
 
 private slots:

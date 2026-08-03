@@ -286,19 +286,27 @@ void FileBrowserPanel::onContextMenuRequested(const QPoint& pos) {
     } else if (chosen == transferAction) {
         const QModelIndexList rows = m_view->selectionModel()->selectedRows(0);
         if (m_mode == BrowserMode::Local) {
-            QStringList paths;
+            QStringList filePaths;
+            QStringList folderPaths;
             for (const QModelIndex& rowIndex : rows) {
                 const FileEntryModel::Entry& entry = m_model->entryAt(rowIndex.row());
-                if (!entry.isDir) paths.append(joinPath(m_currentPath, entry.name));
+                const QString fullPath = joinPath(m_currentPath, entry.name);
+                if (entry.isDir) folderPaths.append(fullPath);
+                else filePaths.append(fullPath);
             }
-            if (!paths.isEmpty()) emit uploadRequested(paths);
+            if (!filePaths.isEmpty()) emit uploadRequested(filePaths);
+            if (!folderPaths.isEmpty()) emit folderUploadRequested(folderPaths);
         } else {
             QList<QPair<QString, qint64>> files;
+            QStringList folderPaths;
             for (const QModelIndex& rowIndex : rows) {
                 const FileEntryModel::Entry& entry = m_model->entryAt(rowIndex.row());
-                if (!entry.isDir) files.append({joinPath(m_currentPath, entry.name), entry.size});
+                const QString fullPath = joinPath(m_currentPath, entry.name);
+                if (entry.isDir) folderPaths.append(fullPath);
+                else files.append({fullPath, entry.size});
             }
             if (!files.isEmpty()) emit downloadRequested(files);
+            if (!folderPaths.isEmpty()) emit folderDownloadRequested(folderPaths);
         }
     }
 }

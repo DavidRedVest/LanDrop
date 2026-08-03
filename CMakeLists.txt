@@ -87,6 +87,7 @@ add_executable(gui_core_integration_test
     tests/gui_core_integration_test.cpp
     client/connection.cpp
     client/transfer.cpp
+    client/foldertransfer.cpp
     server/ftpserver.cpp
 )
 target_link_libraries(gui_core_integration_test common ftpcore Qt6::Core)
@@ -127,6 +128,7 @@ add_executable(landrop_client MACOSX_BUNDLE WIN32
     client/filebrowser.cpp
     client/transferwidget.cpp
     client/sitemanager.cpp
+    client/foldertransfer.cpp
     resources/landrop.qrc
     ${ICON_SOURCES}
 )

@@ -12,6 +12,7 @@
 // 脆弱的 UI 自动化工具链。
 #include "../client/connection.h"
 #include "../client/transfer.h"
+#include "../client/foldertransfer.h"
 #include "../server/ftpserver.h"
 
 #include <QByteArray>
@@ -291,6 +292,60 @@ int main(int argc, char** argv) {
     QFile::remove(pauseSrc);
     QFile::remove(cancelSrc);
     for (const QString& busyPath : busySrcPaths) QFile::remove(busyPath);
+
+    // ---- FolderTransferCoordinator: 递归文件夹上传/下载往返 ----
+    // 本地目录结构:
+    //   <folderSrc>/topfolder/file_a.bin
+    //   <folderSrc>/topfolder/sub/file_b.bin
+    // 期望上传后服务端出现 /topfolder/file_a.bin 和 /topfolder/sub/file_b.bin,
+    // 嵌套结构原样保留,不是被拍平。
+    FolderTransferCoordinator coordinator(&connection, &queue);
+
+    const QString folderSrcBase = QDir::tempPath() + "/landrop_gui_integration_folder_src";
+    QDir(folderSrcBase).removeRecursively();
+    const QString topFolder = folderSrcBase + "/topfolder";
+    QDir().mkpath(topFolder + "/sub");
+    const QByteArray fileAData = QByteArray("file-a-content").repeated(1000);
+    const QByteArray fileBData = QByteArray("file-b-nested-content").repeated(1000);
+    {
+        QFile fa(topFolder + "/file_a.bin");
+        fa.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        fa.write(fileAData);
+        QFile fb(topFolder + "/sub/file_b.bin");
+        fb.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        fb.write(fileBData);
+    }
+
+    coordinator.uploadFolders({topFolder}, "/");
+
+    const QString serverFileA = serverRoot + "/topfolder/file_a.bin";
+    const QString serverFileB = serverRoot + "/topfolder/sub/file_b.bin";
+    check(waitUntil([&] { return QFile::exists(serverFileA) && QFile::exists(serverFileB); }, 15000),
+          "folder upload recreates the nested directory structure on the server disk");
+    check(waitUntil([&] { return sha256OfFile(serverFileA) == QCryptographicHash::hash(fileAData, QCryptographicHash::Sha256); },
+                     15000),
+          "uploaded top-level file in the folder matches source content byte-for-byte");
+    check(waitUntil([&] { return sha256OfFile(serverFileB) == QCryptographicHash::hash(fileBData, QCryptographicHash::Sha256); },
+                     15000),
+          "uploaded nested file in the folder matches source content byte-for-byte");
+
+    const QString folderDownloadBase = QDir::tempPath() + "/landrop_gui_integration_folder_download";
+    QDir(folderDownloadBase).removeRecursively();
+    QDir().mkpath(folderDownloadBase);
+
+    coordinator.downloadFolders({"/topfolder"}, folderDownloadBase);
+
+    const QString downloadedFileA = folderDownloadBase + "/topfolder/file_a.bin";
+    const QString downloadedFileB = folderDownloadBase + "/topfolder/sub/file_b.bin";
+    check(waitUntil([&] { return QFile::exists(downloadedFileA) && QFile::exists(downloadedFileB); }, 15000),
+          "folder download recreates the nested directory structure locally");
+    check(waitUntil([&] { return sha256OfFile(downloadedFileA) == sha256OfFile(serverFileA); }, 15000),
+          "downloaded top-level file matches the server copy byte-for-byte");
+    check(waitUntil([&] { return sha256OfFile(downloadedFileB) == sha256OfFile(serverFileB); }, 15000),
+          "downloaded nested file matches the server copy byte-for-byte");
+
+    QDir(folderSrcBase).removeRecursively();
+    QDir(folderDownloadBase).removeRecursively();
 
     connection.disconnectFromHost();
     server.stop();

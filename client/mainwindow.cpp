@@ -4,6 +4,7 @@
 #include "filebrowser.h"
 #include "transferwidget.h"
 #include "sitemanager.h"
+#include "foldertransfer.h"
 
 #include <QSplitter>
 #include <QDockWidget>
@@ -21,6 +22,7 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , m_connection(new Connection(this))
     , m_transferQueue(new TransferQueue(this))
+    , m_folderTransfer(new FolderTransferCoordinator(m_connection, m_transferQueue, this))
 {
     setWindowTitle(QStringLiteral("LanDrop 客户端"));
     resize(1100, 700);
@@ -75,6 +77,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_remotePanel, &FileBrowserPanel::downloadRequested, this, &MainWindow::onRemoteDownloadRequested);
     connect(m_localPanel, &FileBrowserPanel::statusMessage, this, &MainWindow::onStatusMessage);
     connect(m_remotePanel, &FileBrowserPanel::statusMessage, this, &MainWindow::onStatusMessage);
+
+    connect(m_localPanel, &FileBrowserPanel::folderUploadRequested, this, &MainWindow::onFolderUploadRequested);
+    connect(m_remotePanel, &FileBrowserPanel::folderDownloadRequested, this, &MainWindow::onFolderDownloadRequested);
 
     setConnectedUiState(false);
 }
@@ -157,6 +162,18 @@ void MainWindow::onRemoteDownloadRequested(const QList<QPair<QString, qint64>>& 
     for (const auto& file : remoteFiles) {
         m_transferQueue->enqueueDownload(file.first, m_localPanel->currentPath(), file.second);
     }
+}
+
+void MainWindow::onFolderUploadRequested(const QStringList& localFolderPaths) {
+    if (!m_connection->isConnected()) {
+        QMessageBox::information(this, QStringLiteral("上传"), QStringLiteral("请先连接到服务器。"));
+        return;
+    }
+    m_folderTransfer->uploadFolders(localFolderPaths, m_remotePanel->currentPath());
+}
+
+void MainWindow::onFolderDownloadRequested(const QStringList& remoteFolderPaths) {
+    m_folderTransfer->downloadFolders(remoteFolderPaths, m_localPanel->currentPath());
 }
 
 void MainWindow::onStatusMessage(const QString& message) {
