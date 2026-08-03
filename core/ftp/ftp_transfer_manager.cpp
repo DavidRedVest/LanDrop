@@ -6,6 +6,8 @@
 
 namespace core {
 
+std::atomic<uint64_t> FtpTransferManager::s_taskCounter{0};
+
 namespace {
 constexpr int kMaxAutoRetries = 3;
 constexpr int kRetryBackoffStepMs = 2000; // 线性退避,和旧 Qt 版本的 min(retryCount,5)*2000ms 一致
@@ -55,7 +57,7 @@ void FtpTransferManager::stop() {
 }
 
 std::string FtpTransferManager::nextTaskId() {
-    return "task-" + std::to_string(m_taskCounter.fetch_add(1) + 1);
+    return "task-" + std::to_string(s_taskCounter.fetch_add(1) + 1);
 }
 
 std::string FtpTransferManager::enqueueUpload(std::string localPath, std::string remotePath, uint64_t localFileSize) {

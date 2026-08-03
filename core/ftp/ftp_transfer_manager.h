@@ -138,7 +138,15 @@ private:
     mutable std::mutex m_tasksMutex;
     std::condition_variable m_tasksCv; // 有新的 Queued 任务或停止请求时唤醒等待中的 worker
     std::vector<TaskRecord> m_tasks;   // 按插入顺序,和旧 QList<TransferTask> 的行序语义一致
-    std::atomic<uint64_t> m_taskCounter{0};
+    // 跨实例共享(static):GUI 层(TransferQueue)每次重连都会 stop() 旧的、new 一个
+    // 新的 FtpTransferManager,但旧连接会话里已完成的任务行还留在 TransferQueue::
+    // m_tasks 里不会被清空。如果这里是普通成员变量,新 manager 会从 0 重新计数,
+    // 新任务的 id(如 "task-1")就会撞上上一次会话里同名的旧行——TransferQueue::
+    // rowForId() 按插入顺序找到的是先出现的那个旧行,新任务的 progress/state 回调
+    // 全部被错误地写到那一行上,真正的新行永远收不到更新,表现为 UI 上永远"排队中"
+    // 且没有进度条(实测复现:断线重连后正是这个现象)。计数器改成进程级共享,保证
+    // id 在整个进程生命周期内不重复,不管重连/重建多少次。
+    static std::atomic<uint64_t> s_taskCounter;
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_started{false};
 
