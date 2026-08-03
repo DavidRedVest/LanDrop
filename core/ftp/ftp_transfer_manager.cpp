@@ -1,6 +1,7 @@
 #include "ftp_transfer_manager.h"
 
 #include <algorithm>
+#include <exception>
 #include <utility>
 
 namespace core {
@@ -233,28 +234,52 @@ void FtpTransferManager::workerLoop(WorkerSlot& slot) {
             slot.currentTaskId = taskId;
         }
 
-        if (!slot.client->isConnected()) {
-            const FtpResult connectResult = slot.client->connect(m_host, m_port, kConnectTimeoutMs);
-            const FtpResult loginResult =
-                connectResult == FtpResult::Ok ? slot.client->login(m_username, m_password) : connectResult;
-            if (loginResult != FtpResult::Ok) {
-                int retryCount = 0;
-                updateTask(taskId, [&](TaskRecord& record) {
-                    record.task.state = FtpTaskState::Failed;
-                    record.task.statusMessage = "connect/login failed";
-                    ++record.task.retryCount;
-                    retryCount = record.task.retryCount;
-                });
-                reportState(taskId, FtpTaskState::Failed, "connect/login failed");
-                if (retryCount <= kMaxAutoRetries) scheduleRetry(taskId, retryCount);
+        // 整个任务处理过程包一层 try/catch:这是这个 worker 线程的顶层循环体,
+        // 任何未捕获异常逃出去都会 std::terminate() 整个客户端进程(同一类问题
+        // 见 core/ftp/ftp_session.cpp 里 FtpSession::run() 的注释)。抓住后把这个
+        // 任务标记失败、走正常的自动重试路径,这个 worker 本身留着继续处理队列
+        // 里的下一个任务,不影响其它并发任务。
+        bool caughtException = false;
+        try {
+            if (!slot.client->isConnected()) {
+                const FtpResult connectResult = slot.client->connect(m_host, m_port, kConnectTimeoutMs);
+                const FtpResult loginResult =
+                    connectResult == FtpResult::Ok ? slot.client->login(m_username, m_password) : connectResult;
+                if (loginResult != FtpResult::Ok) {
+                    int retryCount = 0;
+                    updateTask(taskId, [&](TaskRecord& record) {
+                        record.task.state = FtpTaskState::Failed;
+                        record.task.statusMessage = "connect/login failed";
+                        ++record.task.retryCount;
+                        retryCount = record.task.retryCount;
+                    });
+                    reportState(taskId, FtpTaskState::Failed, "connect/login failed");
+                    if (retryCount <= kMaxAutoRetries) scheduleRetry(taskId, retryCount);
 
-                std::lock_guard<std::mutex> lock(slot.mutex);
-                slot.currentTaskId.clear();
-                continue;
+                    std::lock_guard<std::mutex> lock(slot.mutex);
+                    slot.currentTaskId.clear();
+                    continue;
+                }
             }
+
+            runTask(*slot.client, taskId);
+        } catch (const std::exception&) {
+            caughtException = true;
+        } catch (...) {
+            caughtException = true;
         }
 
-        runTask(*slot.client, taskId);
+        if (caughtException) {
+            int retryCount = 0;
+            updateTask(taskId, [&](TaskRecord& record) {
+                record.task.state = FtpTaskState::Failed;
+                record.task.statusMessage = "unexpected internal error";
+                ++record.task.retryCount;
+                retryCount = record.task.retryCount;
+            });
+            reportState(taskId, FtpTaskState::Failed, "unexpected internal error");
+            if (retryCount <= kMaxAutoRetries) scheduleRetry(taskId, retryCount);
+        }
 
         std::lock_guard<std::mutex> lock(slot.mutex);
         slot.currentTaskId.clear();

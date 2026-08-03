@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -542,66 +543,81 @@ void FtpSession::run() {
     log("connected");
     sendReply(220, "LanDrop core FTP server ready");
 
-    while (!m_stopRequested.load()) {
-        std::string line;
-        if (!readLine(line, kControlIdleTimeoutMs)) break;
-        if (line.empty()) continue;
+    // 这整个 try 是防止"一个客户端的一次操作把整个服务端进程带崩"的最后一道
+    // 防线:run() 是这个会话专属 std::thread 的顶层入口函数,C++ 的规则是——顶层
+    // 线程函数一旦有未捕获异常逃出去,运行时会直接调用 std::terminate() 杀掉
+    // 整个进程,不只是这一条连接。这不是理论风险:std::filesystem 在真实文件
+    // 系统上(尤其是 Windows 上超长路径、权限异常等边缘情况)确实会在个别调用上
+    // 抛 filesystem_error,而这里的命令处理函数(handleMkd/handleRetr/handleStor
+    // 等)大多直接用 std::filesystem 操作真实文件——任何一个没预料到的异常场景,
+    // 之前都会直接终结整个服务端进程、把其它所有正常连着的客户端一起带崩。
+    // 捕获后只结束这一个会话(走到下面的清理逻辑),不影响 FtpServer 和其它会话。
+    try {
+        while (!m_stopRequested.load()) {
+            std::string line;
+            if (!readLine(line, kControlIdleTimeoutMs)) break;
+            if (line.empty()) continue;
 
-        std::string verb = line;
-        std::string arg;
-        const auto sp = line.find(' ');
-        if (sp != std::string::npos) {
-            verb = line.substr(0, sp);
-            arg = line.substr(sp + 1);
-        }
-        std::transform(verb.begin(), verb.end(), verb.begin(), toUpperChar);
+            std::string verb = line;
+            std::string arg;
+            const auto sp = line.find(' ');
+            if (sp != std::string::npos) {
+                verb = line.substr(0, sp);
+                arg = line.substr(sp + 1);
+            }
+            std::transform(verb.begin(), verb.end(), verb.begin(), toUpperChar);
 
-        if (verb == "USER") {
-            handleUser(arg);
-        } else if (verb == "PASS") {
-            handlePass(arg);
-        } else if (verb == "PWD" || verb == "XPWD") {
-            handlePwd();
-        } else if (verb == "CWD" || verb == "XCWD") {
-            handleCwd(arg);
-        } else if (verb == "CDUP" || verb == "XCUP") {
-            handleCwd("..");
-        } else if (verb == "TYPE") {
-            handleType(arg);
-        } else if (verb == "PASV") {
-            handlePasv();
-        } else if (verb == "LIST") {
-            handleList(arg, false);
-        } else if (verb == "MLSD") {
-            handleList(arg, true);
-        } else if (verb == "RETR") {
-            handleRetr(arg);
-        } else if (verb == "STOR") {
-            handleStor(arg);
-        } else if (verb == "REST") {
-            handleRest(arg);
-        } else if (verb == "MKD" || verb == "XMKD") {
-            handleMkd(arg);
-        } else if (verb == "RMD" || verb == "XRMD") {
-            handleRmd(arg);
-        } else if (verb == "DELE") {
-            handleDele(arg);
-        } else if (verb == "RNFR") {
-            handleRnfr(arg);
-        } else if (verb == "RNTO") {
-            handleRnto(arg);
-        } else if (verb == "NOOP") {
-            sendReply(200, "NOOP ok");
-        } else if (verb == "FEAT") {
-            sendFeat();
-        } else if (verb == "SYST") {
-            sendReply(215, "UNIX Type: L8");
-        } else if (verb == "QUIT") {
-            sendReply(221, "Goodbye");
-            break;
-        } else {
-            sendReply(502, "Command not implemented");
+            if (verb == "USER") {
+                handleUser(arg);
+            } else if (verb == "PASS") {
+                handlePass(arg);
+            } else if (verb == "PWD" || verb == "XPWD") {
+                handlePwd();
+            } else if (verb == "CWD" || verb == "XCWD") {
+                handleCwd(arg);
+            } else if (verb == "CDUP" || verb == "XCUP") {
+                handleCwd("..");
+            } else if (verb == "TYPE") {
+                handleType(arg);
+            } else if (verb == "PASV") {
+                handlePasv();
+            } else if (verb == "LIST") {
+                handleList(arg, false);
+            } else if (verb == "MLSD") {
+                handleList(arg, true);
+            } else if (verb == "RETR") {
+                handleRetr(arg);
+            } else if (verb == "STOR") {
+                handleStor(arg);
+            } else if (verb == "REST") {
+                handleRest(arg);
+            } else if (verb == "MKD" || verb == "XMKD") {
+                handleMkd(arg);
+            } else if (verb == "RMD" || verb == "XRMD") {
+                handleRmd(arg);
+            } else if (verb == "DELE") {
+                handleDele(arg);
+            } else if (verb == "RNFR") {
+                handleRnfr(arg);
+            } else if (verb == "RNTO") {
+                handleRnto(arg);
+            } else if (verb == "NOOP") {
+                sendReply(200, "NOOP ok");
+            } else if (verb == "FEAT") {
+                sendFeat();
+            } else if (verb == "SYST") {
+                sendReply(215, "UNIX Type: L8");
+            } else if (verb == "QUIT") {
+                sendReply(221, "Goodbye");
+                break;
+            } else {
+                sendReply(502, "Command not implemented");
+            }
         }
+    } catch (const std::exception& e) {
+        log(std::string("session terminated by unexpected exception: ") + e.what());
+    } catch (...) {
+        log("session terminated by unexpected non-standard exception");
     }
 
     m_control.close();

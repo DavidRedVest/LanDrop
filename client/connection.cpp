@@ -47,18 +47,25 @@ void Connection::threadMain() {
     m_connected = true;
     QMetaObject::invokeMethod(this, [this] { emit connected(); }, Qt::QueuedConnection);
 
-    std::unique_lock<std::mutex> lock(m_queueMutex);
-    while (!m_stopRequested.load()) {
-        m_queueCv.wait(lock, [this] { return m_stopRequested.load() || !m_jobs.empty(); });
-        if (m_stopRequested.load()) break;
+    // 这个 try 和服务端 FtpSession::run() 里的道理完全一样:这是这条控制通道
+    // 专属 std::thread 的顶层循环,任何一个 job(比如某次 login/listDirectory 的
+    // lambda)里未预料到的异常逃出去,都会 std::terminate() 整个客户端进程——
+    // 抓住后只结束这条连接,不影响应用其它部分。
+    try {
+        std::unique_lock<std::mutex> lock(m_queueMutex);
+        while (!m_stopRequested.load()) {
+            m_queueCv.wait(lock, [this] { return m_stopRequested.load() || !m_jobs.empty(); });
+            if (m_stopRequested.load()) break;
 
-        Job job = std::move(m_jobs.front());
-        m_jobs.pop_front();
-        lock.unlock();
-        job(client);
-        lock.lock();
+            Job job = std::move(m_jobs.front());
+            m_jobs.pop_front();
+            lock.unlock();
+            job(client);
+            lock.lock();
+        }
+    } catch (...) {
+        // 吞掉,走到下面统一的断开清理逻辑。
     }
-    lock.unlock();
 
     m_connected = false;
     client.disconnect();
