@@ -46,8 +46,9 @@ void FtpServer::acceptLoop() {
         Socket client;
         if (!m_listenSocket.accept(client, kAcceptPollTimeoutMs)) continue; // 超时或停止,重新检查 m_running
 
-        auto session = std::unique_ptr<FtpSession>(
-            new FtpSession(std::move(client), m_rootPath, m_authenticator, m_rootPathResolver, m_onLog));
+        SessionCallbacks callbacks{m_authenticator,    m_rootPathResolver,   m_onLog,
+                                   m_onTransferStarted, m_onTransferProgress, m_onTransferCompleted};
+        auto session = std::unique_ptr<FtpSession>(new FtpSession(std::move(client), m_rootPath, callbacks));
         session->start();
 
         std::lock_guard<std::mutex> lock(m_sessionsMutex);

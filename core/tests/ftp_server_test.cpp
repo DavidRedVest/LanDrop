@@ -6,10 +6,14 @@
 #include "../ftp/ftp_client.h"
 #include "../ftp/ftp_server.h"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -29,6 +33,64 @@ std::string readWholeFile(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
+// 服务端的三个结构化传输回调是从 FtpSession 自己的后台线程触发的,和主测试线程
+// (在 FtpClient::uploadFile/downloadFile 同步调用返回后检查结果)是两条不同的
+// 线程——sendReply(226,...) 只保证本地把字节交给了 OS 发送缓冲区,不保证客户端
+// 那一刻已经读到并处理完;不能假设"client 调用返回时服务端回调必然已经跑完",
+// 要用带超时的轮询等待,而不是返回后立刻断言。
+bool waitUntil(const std::function<bool()>& predicate, int timeoutMs) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+}
+
+struct TransferStartedEvent {
+    std::string sessionId;
+    std::string fileName;
+    bool isUpload;
+};
+struct TransferCompletedEvent {
+    std::string sessionId;
+    std::string fileName;
+};
+struct ProgressSample {
+    std::string sessionId;
+    uint64_t transferred;
+    uint64_t total;
+};
+
+std::mutex g_eventsMutex;
+std::vector<TransferStartedEvent> g_started;
+std::vector<TransferCompletedEvent> g_completed;
+std::vector<ProgressSample> g_progress;
+
+bool anyStartedSince(size_t fromIndex, const std::string& fileName, bool isUpload) {
+    std::lock_guard<std::mutex> lock(g_eventsMutex);
+    for (size_t i = fromIndex; i < g_started.size(); ++i) {
+        if (g_started[i].fileName == fileName && g_started[i].isUpload == isUpload) return true;
+    }
+    return false;
+}
+
+bool anyCompletedSince(size_t fromIndex, const std::string& fileName) {
+    std::lock_guard<std::mutex> lock(g_eventsMutex);
+    for (size_t i = fromIndex; i < g_completed.size(); ++i) {
+        if (g_completed[i].fileName == fileName) return true;
+    }
+    return false;
+}
+
+bool anyProgressSince(size_t fromIndex, uint64_t expectedTotal) {
+    std::lock_guard<std::mutex> lock(g_eventsMutex);
+    for (size_t i = fromIndex; i < g_progress.size(); ++i) {
+        if (g_progress[i].total == expectedTotal) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -42,6 +104,18 @@ int main() {
     server.setRootPath(root.string());
     server.setAuthenticator(
         [](const std::string& user, const std::string& pass) { return user == "testuser" && pass == "testpass"; });
+    server.setTransferStartedCallback([](const std::string& sessionId, const std::string& fileName, bool isUpload) {
+        std::lock_guard<std::mutex> lock(g_eventsMutex);
+        g_started.push_back({sessionId, fileName, isUpload});
+    });
+    server.setTransferProgressCallback([](const std::string& sessionId, uint64_t transferred, uint64_t total) {
+        std::lock_guard<std::mutex> lock(g_eventsMutex);
+        g_progress.push_back({sessionId, transferred, total});
+    });
+    server.setTransferCompletedCallback([](const std::string& sessionId, const std::string& fileName) {
+        std::lock_guard<std::mutex> lock(g_eventsMutex);
+        g_completed.push_back({sessionId, fileName});
+    });
 
     constexpr uint16_t kPort = 19570;
     check(server.start(kPort), "FtpServer::start binds and listens on a real port");
@@ -77,9 +151,21 @@ int main() {
     }
     const std::string srcContent = readWholeFile(localSrc.string());
 
+    const size_t startedBeforeUpload = g_started.size();
+    const size_t completedBeforeUpload = g_completed.size();
+    const size_t progressBeforeUpload = g_progress.size();
     check(client.uploadFile(localSrc.string(), "/sub/uploaded.bin") == core::FtpResult::Ok, "STOR uploads file");
     check(fs::exists(root / "sub" / "uploaded.bin"), "uploaded file exists on server disk");
     check(fs::file_size(root / "sub" / "uploaded.bin") == srcContent.size(), "uploaded file size matches source");
+
+    check(waitUntil([&] { return anyStartedSince(startedBeforeUpload, "uploaded.bin", /*isUpload=*/true); }, 2000),
+          "server fired TransferStartedCallback for the upload (isUpload=true)");
+    check(waitUntil([&] { return anyCompletedSince(completedBeforeUpload, "uploaded.bin"); }, 2000),
+          "server fired TransferCompletedCallback for the upload");
+    // STOR 上传方向,标准 FTP 没有让客户端预先声明文件大小的机制,total 必须是 0
+    // (未知)——和 core::FtpClient 自己上传时的约定一致,见 ftp_server.h 里的注释。
+    check(waitUntil([&] { return anyProgressSince(progressBeforeUpload, /*expectedTotal=*/0); }, 2000),
+          "server fired TransferProgressCallback for the upload with total=0 (unknown, STOR has no size pre-announcement)");
 
     std::vector<core::FtpFileEntry> entries;
     check(client.list("/sub", entries) == core::FtpResult::Ok, "LIST /sub succeeds");
@@ -95,8 +181,21 @@ int main() {
 
     const fs::path localDst = fs::temp_directory_path() / "landrop_ftp_server_test_dst.bin";
     fs::remove(localDst, ec);
+    const size_t startedBeforeDownload = g_started.size();
+    const size_t completedBeforeDownload = g_completed.size();
+    const size_t progressBeforeDownload = g_progress.size();
     check(client.downloadFile("/sub/uploaded.bin", localDst.string()) == core::FtpResult::Ok, "RETR downloads file");
     check(readWholeFile(localDst.string()) == srcContent, "downloaded content matches uploaded content byte-for-byte");
+
+    check(waitUntil([&] { return anyStartedSince(startedBeforeDownload, "uploaded.bin", /*isUpload=*/false); }, 2000),
+          "server fired TransferStartedCallback for the download (isUpload=false)");
+    check(waitUntil([&] { return anyCompletedSince(completedBeforeDownload, "uploaded.bin"); }, 2000),
+          "server fired TransferCompletedCallback for the download");
+    // RETR 下载方向,文件大小提前已知(就是磁盘上那个文件的大小),total 必须是
+    // 真实字节数,不是 0。
+    check(waitUntil([&] { return anyProgressSince(progressBeforeDownload, /*expectedTotal=*/srcContent.size()); },
+                     2000),
+          "server fired TransferProgressCallback for the download with the real total size (known upfront for RETR)");
 
     // 续传:截断本地文件到一半,从该 offset 续传下载,验证最终内容和完整原文件一致。
     {

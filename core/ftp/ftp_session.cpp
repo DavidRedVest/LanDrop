@@ -3,6 +3,7 @@
 #include "ftp_paths.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -18,17 +19,22 @@ constexpr size_t kChunkSize = 262144; // 256KB,和 FtpClient 保持一致
 constexpr int kControlIdleTimeoutMs = 300000; // 5 分钟没收到任何命令就断开
 constexpr int kDataAcceptTimeoutMs = 15000;
 constexpr int kDataStallTimeoutMs = 20000;
+constexpr int kProgressThrottleMs = 200; // 和 client/transfer.cpp 的节流间隔保持一致
 
 char toUpperChar(char c) {
     return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 }
+
+std::atomic<uint64_t> g_sessionCounter{0};
 } // namespace
 
-FtpSession::FtpSession(Socket controlSocket, std::string rootPath, FtpServer::Authenticator authenticator,
-                        FtpServer::RootPathResolver rootPathResolver, FtpServer::SessionLogCallback onLog)
-    : m_control(std::move(controlSocket)), m_rootPath(std::move(rootPath)),
-      m_authenticator(std::move(authenticator)), m_rootPathResolver(std::move(rootPathResolver)),
-      m_onLog(std::move(onLog)) {}
+FtpSession::FtpSession(Socket controlSocket, std::string rootPath, FtpServer::SessionCallbacks callbacks)
+    : m_control(std::move(controlSocket)), m_sessionId("session-" + std::to_string(g_sessionCounter.fetch_add(1) + 1)),
+      m_rootPath(std::move(rootPath)), m_authenticator(std::move(callbacks.authenticator)),
+      m_rootPathResolver(std::move(callbacks.rootPathResolver)), m_onLog(std::move(callbacks.onLog)),
+      m_onTransferStarted(std::move(callbacks.onTransferStarted)),
+      m_onTransferProgress(std::move(callbacks.onTransferProgress)),
+      m_onTransferCompleted(std::move(callbacks.onTransferCompleted)) {}
 
 FtpSession::~FtpSession() {
     requestStop();
@@ -52,6 +58,21 @@ void FtpSession::requestStop() {
 
 void FtpSession::log(const std::string& message) {
     if (m_onLog) m_onLog(m_peerAddress, message);
+}
+
+void FtpSession::reportTransferProgress(uint64_t transferred, uint64_t total,
+                                         std::chrono::steady_clock::time_point& lastReportTime) {
+    if (!m_onTransferProgress) return;
+    const auto now = std::chrono::steady_clock::now();
+    // lastReportTime 的默认构造值(epoch)当"还从没报过一次"的哨兵,保证第一块
+    // 数据必定被立刻报出去,不用等满 200ms。
+    const bool isFirstReport = lastReportTime.time_since_epoch().count() == 0;
+    if (!isFirstReport &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReportTime).count() < kProgressThrottleMs) {
+        return;
+    }
+    lastReportTime = now;
+    m_onTransferProgress(m_sessionId, transferred, total);
 }
 
 // ---- 控制通道读写 ----
@@ -407,7 +428,15 @@ void FtpSession::handleRetr(const std::string& arg) {
     }
     sendReply(150, "Opening BINARY mode data connection for " + arg);
 
+    // RETR 是服务端发送、大小提前已知(文件本身的大小),不像 STOR 那样 total 只能
+    // 传 0——和 core::FtpClient 自己下载时上报的语义一致。
+    const uint64_t totalSize = static_cast<uint64_t>(fs::file_size(osPath, ec));
+    const std::string fileName = fs::path(osPath).filename().string();
+    if (m_onTransferStarted) m_onTransferStarted(m_sessionId, fileName, /*isUpload=*/false);
+
     std::vector<char> chunk(kChunkSize);
+    uint64_t transferred = offset;
+    std::chrono::steady_clock::time_point lastReportTime{};
     bool failed = false;
     while (file) {
         file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
@@ -417,6 +446,8 @@ void FtpSession::handleRetr(const std::string& arg) {
             failed = true;
             break;
         }
+        transferred += static_cast<uint64_t>(n);
+        reportTransferProgress(transferred, totalSize, lastReportTime);
     }
     dataSocket.close();
 
@@ -425,6 +456,7 @@ void FtpSession::handleRetr(const std::string& arg) {
         return;
     }
     sendReply(226, "Transfer complete");
+    if (m_onTransferCompleted) m_onTransferCompleted(m_sessionId, fileName);
 }
 
 void FtpSession::handleStor(const std::string& arg) {
@@ -463,7 +495,14 @@ void FtpSession::handleStor(const std::string& arg) {
     }
     sendReply(150, "Ready to receive " + arg);
 
+    // STOR 是服务端接收:标准 FTP 没有让客户端预先声明文件总大小的机制,total 传
+    // 0 表示"未知"——和 core::FtpClient 自己上传时上报进度的约定完全一致。
+    const std::string fileName = p.filename().string();
+    if (m_onTransferStarted) m_onTransferStarted(m_sessionId, fileName, /*isUpload=*/true);
+
     std::vector<char> chunk(kChunkSize);
+    uint64_t transferred = offset;
+    std::chrono::steady_clock::time_point lastReportTime{};
     bool failed = false;
     for (;;) {
         const WaitResult wr = dataSocket.waitReadable(kDataStallTimeoutMs);
@@ -482,6 +521,8 @@ void FtpSession::handleStor(const std::string& arg) {
             failed = true;
             break;
         }
+        transferred += static_cast<uint64_t>(n);
+        reportTransferProgress(transferred, 0, lastReportTime);
     }
     file.close();
     dataSocket.close();
@@ -491,6 +532,7 @@ void FtpSession::handleStor(const std::string& arg) {
         return;
     }
     sendReply(226, "Transfer complete");
+    if (m_onTransferCompleted) m_onTransferCompleted(m_sessionId, fileName);
 }
 
 // ---- 主循环 ----

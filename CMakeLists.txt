@@ -28,6 +28,7 @@ find_package(Threads REQUIRED)
 
 add_library(ftpcore STATIC
     core/platform/socket.cpp
+    core/platform/udp_socket.cpp
     core/heartbeat.cpp
     core/hash/sha256.cpp
     core/ftp/ftp_client.cpp
@@ -35,6 +36,7 @@ add_library(ftpcore STATIC
     core/ftp/ftp_session.cpp
     core/ftp/ftp_server.cpp
     core/ftp/ftp_transfer_manager.cpp
+    core/discovery/lan_discovery.cpp
 )
 target_include_directories(ftpcore PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(ftpcore PUBLIC Threads::Threads)
@@ -70,6 +72,10 @@ set_target_properties(ftp_server_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC
 add_executable(ftp_transfer_manager_test core/tests/ftp_transfer_manager_test.cpp)
 target_link_libraries(ftp_transfer_manager_test ftpcore)
 set_target_properties(ftp_transfer_manager_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
+add_executable(lan_discovery_test core/tests/lan_discovery_test.cpp)
+target_link_libraries(lan_discovery_test ftpcore)
+set_target_properties(lan_discovery_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 
 # App icon: resources/icons/landrop.png is embedded as a Qt resource and set as
 # the runtime window icon (title bar / dock / taskbar) on every platform.

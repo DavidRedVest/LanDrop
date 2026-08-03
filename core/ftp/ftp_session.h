@@ -8,6 +8,7 @@
 #include "ftp_server.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -16,8 +17,7 @@ namespace core {
 
 class FtpSession {
 public:
-    FtpSession(Socket controlSocket, std::string rootPath, FtpServer::Authenticator authenticator,
-               FtpServer::RootPathResolver rootPathResolver, FtpServer::SessionLogCallback onLog);
+    FtpSession(Socket controlSocket, std::string rootPath, FtpServer::SessionCallbacks callbacks);
     ~FtpSession();
 
     FtpSession(const FtpSession&) = delete;
@@ -60,15 +60,27 @@ private:
     std::string resolveVirtualPath(const std::string& arg) const;
     bool requireLoggedIn();
 
+    // 上传/下载分块循环里按 ~200ms 节流后再调用 onTransferProgress——参考
+    // client/transfer.cpp 里 onWorkerProgress() 已经验证过的同一个节流模式:未节流
+    // 时每个 256KB 分块都触发一次回调,大文件下每秒能到几百次,一旦接到 Qt 侧
+    // (通过 QMetaObject::invokeMethod 跨线程排队)会堆积事件队列,重演过那次真实
+    // 的"大文件传输因为高频信号灌爆主线程而被心跳误判超时断开"的 bug。
+    void reportTransferProgress(uint64_t transferred, uint64_t total,
+                                 std::chrono::steady_clock::time_point& lastReportTime);
+
     Socket m_control;
     Socket m_dataListener; // PASV 打开的一次性监听 socket,每次数据传输后关闭
     std::string m_peerAddress;
+    std::string m_sessionId;
     std::string m_rootPath;
     std::string m_cwd = "/";
 
     FtpServer::Authenticator m_authenticator;
     FtpServer::RootPathResolver m_rootPathResolver;
     FtpServer::SessionLogCallback m_onLog;
+    FtpServer::TransferStartedCallback m_onTransferStarted;
+    FtpServer::TransferProgressCallback m_onTransferProgress;
+    FtpServer::TransferCompletedCallback m_onTransferCompleted;
 
     std::thread m_thread;
     std::atomic<bool> m_finished{false};
