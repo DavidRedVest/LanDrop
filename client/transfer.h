@@ -48,7 +48,12 @@ class TransferQueue : public QAbstractTableModel {
     Q_OBJECT
 
 public:
-    enum Column { ColDirection = 0, ColName, ColProgress, ColSpeed, ColEta, ColStatus, ColumnCount };
+    // ColPercent 是纯文本("NN%"),ColProgress 是纯视觉进度条(不叠加文字)——
+    // 拆成两列是因为 QProgressBar 在 macOS 上叠加居中文字时和原生进度条的圆角/
+    // 内嵌渲染冲突,文字会和进度条本身重叠、变得难以辨认(Windows 上没有这个问题,
+    // 是纯粹的平台渲染差异,不是逻辑 bug)。拆开后两边都用各自最简单可靠的渲染
+    // 方式:文字走 Qt::DisplayRole 普通绘制,进度条走 QProgressBar 控件本身。
+    enum Column { ColDirection = 0, ColName, ColPercent, ColProgress, ColSpeed, ColEta, ColStatus, ColumnCount };
     enum Role { BytesTransferredRole = Qt::UserRole + 1, TotalSizeRole, StateRole };
 
     explicit TransferQueue(QObject* parent = nullptr);

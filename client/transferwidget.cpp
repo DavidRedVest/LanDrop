@@ -85,8 +85,10 @@ void TransferWidget::onRowsInserted(const QModelIndex& parent, int first, int la
     for (int row = first; row <= last; ++row) {
         auto* bar = new QProgressBar(m_view);
         bar->setRange(0, 100);
-        bar->setTextVisible(true);
-        bar->setAlignment(Qt::AlignCenter);
+        // 不叠加百分比文字——那是"百分比"列(ColPercent,普通文本列)的活,见
+        // transfer.h 里 Column 枚举的注释:两者拆开是因为 QProgressBar 在 macOS 上
+        // 叠加居中文字时会和原生进度条渲染重叠、变得难以辨认。
+        bar->setTextVisible(false);
         m_view->setIndexWidget(m_queue->index(row, TransferQueue::ColProgress), bar);
         updateProgressCell(row);
     }
@@ -106,7 +108,7 @@ void TransferWidget::updateProgressCell(int row) {
     const qint64 total = progressIndex.data(TransferQueue::TotalSizeRole).toLongLong();
     if (total <= 0) {
         // STOR 上传方向服务端不预先知道总大小、任务还没连接上等情况:总量未知,
-        // 没法算百分比,不显示进度条(和之前 ColProgress 文本 "--" 的语义一致)。
+        // 没法算百分比,不显示进度条(和 ColPercent 文本 "--" 的语义一致)。
         bar->setVisible(false);
         return;
     }
@@ -114,5 +116,4 @@ void TransferWidget::updateProgressCell(int row) {
     const qint64 transferred = progressIndex.data(TransferQueue::BytesTransferredRole).toLongLong();
     const int percent = static_cast<int>(qBound<qint64>(qint64(0), transferred * 100 / total, qint64(100)));
     bar->setValue(percent);
-    bar->setFormat(QStringLiteral("%1%").arg(percent));
 }

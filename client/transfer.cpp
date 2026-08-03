@@ -220,9 +220,11 @@ QVariant TransferQueue::data(const QModelIndex& index, int role) const {
         return task.direction == TransferTask::Direction::Upload ? QStringLiteral("上传") : QStringLiteral("下载");
     case ColName:
         return QFileInfo(task.direction == TransferTask::Direction::Upload ? task.localPath : task.remotePath).fileName();
-    case ColProgress:
+    case ColPercent:
         return task.totalSize > 0 ? QStringLiteral("%1%").arg(task.bytesTransferred * 100 / task.totalSize)
                                    : QStringLiteral("--");
+    case ColProgress:
+        return {}; // 纯视觉进度条,由 TransferWidget 用 QProgressBar 控件覆盖渲染,不需要文字
     case ColSpeed:
         return task.bytesPerSecond > 0 ? FTP::Utils::formatSpeed(task.bytesPerSecond) : QString();
     case ColEta: {
@@ -252,6 +254,7 @@ QVariant TransferQueue::headerData(int section, Qt::Orientation orientation, int
     switch (section) {
     case ColDirection: return QStringLiteral("方向");
     case ColName: return QStringLiteral("文件");
+    case ColPercent: return QStringLiteral("百分比");
     case ColProgress: return QStringLiteral("进度");
     case ColSpeed: return QStringLiteral("速度");
     case ColEta: return QStringLiteral("剩余时间");
