@@ -30,21 +30,20 @@ void TransferProgressDelegate::paint(QPainter* painter, const QStyleOptionViewIt
     // otherwise bleed into whichever cell paints next.
     painter->save();
     QStyleOptionProgressBar barOption;
-    // initFrom() seeds state/palette/direction/fontMetrics from the actual viewport widget.
-    // Without it, QStyleOptionProgressBar::state defaults to State_None (not Enabled, not
-    // Active, not Horizontal) — on QMacStyle specifically this incomplete state produces
-    // wrong/stale geometry (observed: first row's bar painted under the wrong column
-    // entirely, later rows painted nothing at all), not just a visual glitch. rect is
-    // overwritten afterward with this cell's own rect since initFrom() sets it to the
-    // whole widget's rect.
-    if (option.widget) {
-        barOption.initFrom(option.widget);
-    }
-    barOption.rect = option.rect.adjusted(2, 2, -2, -2);
-    barOption.state |= QStyle::State_Enabled | QStyle::State_Active | QStyle::State_Horizontal;
+    // 直接从 option(QStyleOptionViewItem,本身就是 QStyleOption 的子类)拿
+    // state/palette/direction/fontMetrics,而不是依赖 option.widget 非空再调用
+    // initFrom(option.widget)——option 这几个字段是 Qt 视图框架在每次 paint 调用
+    // 时就已经针对"这一个具体单元格"填好的,不需要 widget 指针这个中间条件。
+    // 之前的写法在 option.widget 恰好为空的情况下会整个跳过初始化,
+    // QStyleOptionProgressBar::state 退回默认的 State_None(不是 Enabled、不是
+    // Active、不是 Horizontal)——在 QMacStyle 上观察到过这会导致进度条画到错误
+    // 的几何位置(第一行画到"方向"列底下,后面几行完全不画),不只是视觉小瑕疵。
+    // 用 option 本身的字段兜底,不管 option.widget 是否有效都能拿到正确初始状态。
+    barOption.state = option.state | QStyle::State_Enabled | QStyle::State_Active | QStyle::State_Horizontal;
     barOption.direction = option.direction;
     barOption.fontMetrics = option.fontMetrics;
     barOption.palette = option.palette;
+    barOption.rect = option.rect.adjusted(2, 2, -2, -2);
     barOption.minimum = 0;
     barOption.maximum = 100;
     barOption.progress = percent;
