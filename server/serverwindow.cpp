@@ -48,7 +48,12 @@ ServerWindow::ServerWindow(QWidget* parent)
     configLayout->addRow(QStringLiteral("根目录:"), rootRow);
 
     m_portSpin = new QSpinBox(configGroup);
-    m_portSpin->setRange(1024, 65534);
+    // 允许填标准 FTP 的默认端口 21——之前限制在 1024+ 是为了避开"绑定 <1024 端口
+    // 需要管理员/root 权限"这件事,但代价是每个连接过来的第三方 FTP 客户端都要
+    // 手动指定端口(标准 FTP 客户端不填端口时默认假设对方在 21 上监听)。现在把
+    // 限制放开,能不能真的绑定成功取决于运行时的权限,失败时在 onToggleServer()
+    // 里给出针对性提示,而不是让用户自己猜"端口被占用"还是"权限不够"。
+    m_portSpin->setRange(1, 65534);
     m_portSpin->setValue(FTP::DEFAULT_PORT);
     // 标准 FTP 用 PASV 按需动态分配数据端口,不再是固定的"端口+1"(那是旧自定义
     // 协议的约定),所以这里的说明文字也要跟着改。
@@ -180,8 +185,20 @@ void ServerWindow::onToggleServer() {
         m_portSpin->setEnabled(true);
     } else {
         m_server->setRootPath(m_rootPathEdit->text());
-        if (!m_server->start(static_cast<quint16>(m_portSpin->value()))) {
-            QMessageBox::warning(this, QStringLiteral("启动失败"), QStringLiteral("端口可能已被占用,请更换端口重试。"));
+        const quint16 port = static_cast<quint16>(m_portSpin->value());
+        if (!m_server->start(port)) {
+            // 绑定失败最常见的两个原因:端口被占用,或者(尤其是 1024 以下的
+            // 标准端口,比如 21)当前用户没有权限绑定"特权端口"——Windows/
+            // macOS/Linux 都一样,绑定 <1024 端口需要管理员/root 身份。这里不去
+            // 深挖底层具体是哪个 OS 错误码(那需要把错误码一路从
+            // core::Socket::bindAndListen() 透传上来,现在的接口只返回
+            // bool),但至少把这个最常见的坑直接point出来,不让用户自己瞎猜。
+            const QString hint = port < 1024
+                                      ? QStringLiteral("端口可能已被占用,或者绑定 1024 以下的端口通常需要以"
+                                                        "管理员/root 权限运行本程序,请尝试用管理员方式重新打开,"
+                                                        "或换一个 1024 以上的端口。")
+                                      : QStringLiteral("端口可能已被占用,请更换端口重试。");
+            QMessageBox::warning(this, QStringLiteral("启动失败"), hint);
             return;
         }
         m_startStopButton->setText(QStringLiteral("停止服务"));

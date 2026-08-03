@@ -11,6 +11,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace core {
@@ -64,10 +65,18 @@ private:
 
     void threadMain();
     void pushJob(Job job);
+    // 只在 worker 线程上被读写(setErrorCallback 的回调和每个 job 完成后都在
+    // 这条线程上跑),不需要额外加锁。取出 core::FtpClient 报的真实错误文本
+    // (比如服务器实际回复的"530 Login incorrect"),取不到时才退回一个通用提示——
+    // 之前这里所有失败场景都是硬编码的中文提示,FtpClient 自己通过
+    // ErrorCallback 报出来的真实原因根本没接上、直接被扔掉了,导致"登录失败"这类
+    // 提示看不出到底是密码错、服务器要求 TLS、账号被限制访问,还是别的协议层原因。
+    QString takeLastErrorOr(const QString& fallback);
 
     QString m_host;
     quint16 m_port = FTP::DEFAULT_PORT;
     std::atomic<bool> m_connected{false};
+    std::string m_lastError;
 
     std::thread m_thread;
     std::mutex m_queueMutex;

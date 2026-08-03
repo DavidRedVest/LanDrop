@@ -21,6 +21,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QStringList>
 #include <QTimer>
 
 #include <functional>
@@ -97,6 +98,35 @@ int main(int argc, char** argv) {
     connection.login("guiuser", "guipass");
     check(waitUntil([&] { return loginFired; }, 5000), "Connection::loginResult fires");
     check(loginOk, "login succeeds with correct credentials via the new Connection/core::FtpClient path");
+
+    // ---- 错误密码时,loginResult 的 message 必须是服务器的真实回复文本
+    // (core::FtpClient 通过 ErrorCallback 报出来的原文,比如 "login failed:
+    // Login incorrect"),不能是硬编码的通用提示——之前 Connection 完全没接
+    // core::FtpClient::setErrorCallback(),所有失败场景在 UI 上只能看到一句
+    // 看不出真实原因的固定文案,这个回归测试就是防止这个接线以后又被悄悄去掉。 ----
+    {
+        Connection badConnection;
+        bool badConnectedFired = false;
+        QObject::connect(&badConnection, &Connection::connected, [&] { badConnectedFired = true; });
+        badConnection.connectToHost("127.0.0.1", kPort);
+        check(waitUntil([&] { return badConnectedFired; }, 5000), "second Connection connects for bad-login test");
+
+        bool badLoginFired = false;
+        bool badLoginOk = true;
+        QString badLoginMessage;
+        QObject::connect(&badConnection, &Connection::loginResult, [&](bool success, const QString& message) {
+            badLoginOk = success;
+            badLoginMessage = message;
+            badLoginFired = true;
+        });
+        badConnection.login("guiuser", "wrongpassword");
+        check(waitUntil([&] { return badLoginFired; }, 5000), "loginResult fires for wrong password");
+        check(!badLoginOk, "login with wrong password is rejected");
+        check(!badLoginMessage.isEmpty() && badLoginMessage.contains("Login incorrect"),
+              "loginResult carries the real server-provided error text, not a generic hardcoded message (got '" +
+                  badLoginMessage + "')");
+        badConnection.disconnectFromHost();
+    }
 
     bool listFired = false;
     bool listOk = false;
@@ -223,6 +253,24 @@ int main(int argc, char** argv) {
     }
 
     // 取消一个还在排队、尚未被任何 worker 处理的任务——确定性分支,不涉及网络时序。
+    // 前提是这个任务真的还 Queued 着:TransferQueue 内部池子有 3 个 worker,这时候
+    // 前面几个任务都已经跑完、worker 都闲着,如果只排一个小文件任务,大概率会在
+    // cancelRow() 真正执行前就被某个空闲 worker 抢走——所以先排几个足够大的"占位"
+    // 任务把 3 个 worker 都占满,确定性地保证紧接着排的这个小任务只能留在队列里。
+    QStringList busySrcPaths;
+    for (int i = 0; i < 3; ++i) {
+        const QString busyPath = QDir::tempPath() + QStringLiteral("/landrop_gui_integration_busy_src_%1.bin").arg(i);
+        {
+            QFile f(busyPath);
+            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            QByteArray data;
+            data.resize(80 * 1024 * 1024); // 80MB,确保占用 worker 的时间够长
+            f.write(data);
+        }
+        busySrcPaths.append(busyPath);
+        queue.enqueueUpload(busyPath, "/");
+    }
+
     const QString cancelSrc = QDir::tempPath() + "/landrop_gui_integration_cancel_src.bin";
     {
         QFile f(cancelSrc);
@@ -242,6 +290,7 @@ int main(int argc, char** argv) {
 
     QFile::remove(pauseSrc);
     QFile::remove(cancelSrc);
+    for (const QString& busyPath : busySrcPaths) QFile::remove(busyPath);
 
     connection.disconnectFromHost();
     server.stop();

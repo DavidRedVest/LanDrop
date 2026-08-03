@@ -34,13 +34,28 @@ void Connection::pushJob(Job job) {
     m_queueCv.notify_one();
 }
 
+QString Connection::takeLastErrorOr(const QString& fallback) {
+    if (m_lastError.empty()) return fallback;
+    QString detail = QString::fromStdString(m_lastError);
+    m_lastError.clear();
+    return detail;
+}
+
 void Connection::threadMain() {
     core::FtpClient client;
+    // 把 core::FtpClient 内部报的真实错误文本(服务器实际回复的原文,比如
+    // "530 Login incorrect"、"USER rejected: ...")接住,而不是让它被默默丢掉——
+    // 之前这里完全没接 ErrorCallback,所有失败场景在 UI 上只能看到硬编码的通用
+    // 中文提示,分不清到底是密码错、服务器要求 TLS、账号被限制,还是别的协议层
+    // 原因。这个回调只会从这条 worker 线程自己触发(client 是这条线程私有的),
+    // 不需要加锁。
+    client.setErrorCallback([this](const std::string& message) { m_lastError = message; });
+
     const core::FtpResult result = client.connect(m_host.toStdString(), m_port, 5000);
     if (result != core::FtpResult::Ok) {
+        const QString detail = takeLastErrorOr(QStringLiteral("连接失败,请检查地址、端口和网络"));
         QMetaObject::invokeMethod(
-            this, [this] { emit connectionError(QStringLiteral("连接失败,请检查地址、端口和网络")); },
-            Qt::QueuedConnection);
+            this, [this, detail] { emit connectionError(detail); }, Qt::QueuedConnection);
         return;
     }
 
@@ -77,7 +92,7 @@ void Connection::login(const QString& username, const QString& password) {
     const std::string pass = password.toStdString();
     pushJob([this, user, pass](core::FtpClient& client) {
         const bool success = client.login(user, pass) == core::FtpResult::Ok;
-        const QString message = success ? QString() : QStringLiteral("用户名或密码错误");
+        const QString message = success ? QString() : takeLastErrorOr(QStringLiteral("登录失败"));
         QMetaObject::invokeMethod(
             this, [this, success, message] { emit loginResult(success, message); }, Qt::QueuedConnection);
     });
@@ -100,7 +115,7 @@ void Connection::listDirectory(const QString& path) {
                 list.append(info);
             }
         }
-        const QString message = success ? QString() : QStringLiteral("目录加载失败");
+        const QString message = success ? QString() : takeLastErrorOr(QStringLiteral("目录加载失败"));
         QMetaObject::invokeMethod(
             this, [this, success, path, message, list] { emit directoryListed(success, path, message, list); },
             Qt::QueuedConnection);
@@ -111,7 +126,7 @@ void Connection::mkdir(const QString& path) {
     const std::string p = path.toStdString();
     pushJob([this, p](core::FtpClient& client) {
         const bool success = client.mkdir(p) == core::FtpResult::Ok;
-        const QString message = success ? QString() : QStringLiteral("创建目录失败");
+        const QString message = success ? QString() : takeLastErrorOr(QStringLiteral("创建目录失败"));
         QMetaObject::invokeMethod(
             this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
     });
@@ -121,7 +136,7 @@ void Connection::rmdir(const QString& path) {
     const std::string p = path.toStdString();
     pushJob([this, p](core::FtpClient& client) {
         const bool success = client.rmdir(p) == core::FtpResult::Ok;
-        const QString message = success ? QString() : QStringLiteral("删除目录失败");
+        const QString message = success ? QString() : takeLastErrorOr(QStringLiteral("删除目录失败"));
         QMetaObject::invokeMethod(
             this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
     });
@@ -131,7 +146,7 @@ void Connection::deleteFile(const QString& path) {
     const std::string p = path.toStdString();
     pushJob([this, p](core::FtpClient& client) {
         const bool success = client.removeFile(p) == core::FtpResult::Ok;
-        const QString message = success ? QString() : QStringLiteral("删除文件失败");
+        const QString message = success ? QString() : takeLastErrorOr(QStringLiteral("删除文件失败"));
         QMetaObject::invokeMethod(
             this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
     });
@@ -142,7 +157,7 @@ void Connection::rename(const QString& oldPath, const QString& newPath) {
     const std::string to = newPath.toStdString();
     pushJob([this, from, to](core::FtpClient& client) {
         const bool success = client.rename(from, to) == core::FtpResult::Ok;
-        const QString message = success ? QString() : QStringLiteral("重命名失败");
+        const QString message = success ? QString() : takeLastErrorOr(QStringLiteral("重命名失败"));
         QMetaObject::invokeMethod(
             this, [this, success, message] { emit operationResult(success, message); }, Qt::QueuedConnection);
     });
