@@ -28,6 +28,7 @@ find_package(Threads REQUIRED)
 add_library(ftpcore STATIC
     core/platform/socket.cpp
     core/platform/udp_socket.cpp
+    core/platform/path_utf8.cpp
     core/heartbeat.cpp
     core/hash/sha256.cpp
     core/ftp/ftp_client.cpp

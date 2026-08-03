@@ -219,6 +219,47 @@ int main() {
     check(client.rmdir("/sub") == core::FtpResult::Ok, "RMD removes directory");
     check(!fs::exists(root / "sub"), "removed directory gone from disk");
 
+    // 非 ASCII 文件名回归测试:core/platform/path_utf8.h 那次改动把 ftp_session.cpp/
+    // ftp_client.cpp 里几乎所有 fs::path 互转都换成了显式 UTF-8 转换(修复 Windows
+    // 上中文文件名导致 "No mapping for the Unicode character..." 异常断连的问题)。
+    // macOS/Linux 的窄字符编码本来就是 UTF-8,复现不了那个 Windows 专属异常,但这里
+    // 至少保证改动本身没有破坏 STOR/RETR/LIST/RNFR+RNTO/DELE 对非 ASCII 文件名的
+    // 正确处理(協議層字符串按字节透传,不能悄悄丢字符或纯粹因为改动而回归)。
+    {
+        const std::string unicodeName = "中文文件名 emoji😀.bin";
+        check(client.uploadFile(localSrc.string(), "/" + unicodeName) == core::FtpResult::Ok,
+              "STOR uploads file with non-ASCII (Chinese + emoji) name");
+        check(fs::exists(root / unicodeName), "non-ASCII-named file exists on server disk with the exact name");
+        check(fs::file_size(root / unicodeName) == srcContent.size(), "non-ASCII-named file size matches source");
+
+        std::vector<core::FtpFileEntry> unicodeEntries;
+        check(client.list("/", unicodeEntries) == core::FtpResult::Ok, "LIST / succeeds with a non-ASCII entry present");
+        bool foundUnicode = false;
+        for (const auto& e : unicodeEntries) {
+            if (e.name == unicodeName) foundUnicode = true;
+        }
+        check(foundUnicode, "LIST correctly reports the non-ASCII file name over the wire (got a match for '" +
+                                 unicodeName + "')");
+
+        const fs::path unicodeDst = fs::temp_directory_path() / "landrop_ftp_server_test_unicode_dst.bin";
+        fs::remove(unicodeDst, ec);
+        check(client.downloadFile("/" + unicodeName, unicodeDst.string()) == core::FtpResult::Ok,
+              "RETR downloads the non-ASCII-named file");
+        check(readWholeFile(unicodeDst.string()) == srcContent,
+              "downloaded non-ASCII-named file content matches source byte-for-byte");
+        fs::remove(unicodeDst, ec);
+
+        const std::string renamedUnicodeName = "重命名后 renamed 🎉.bin";
+        check(client.rename("/" + unicodeName, "/" + renamedUnicodeName) == core::FtpResult::Ok,
+              "RNFR+RNTO renames a non-ASCII-named file to another non-ASCII name");
+        check(fs::exists(root / renamedUnicodeName), "renamed non-ASCII file exists on disk under the new name");
+        check(!fs::exists(root / unicodeName), "old non-ASCII name no longer exists on disk");
+
+        check(client.removeFile("/" + renamedUnicodeName) == core::FtpResult::Ok,
+              "DELE removes the renamed non-ASCII-named file");
+        check(!fs::exists(root / renamedUnicodeName), "renamed non-ASCII-named file gone from disk after DELE");
+    }
+
     client.disconnect();
     server.stop();
     check(!server.isRunning(), "FtpServer::stop() actually stops the server");

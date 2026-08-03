@@ -1,5 +1,7 @@
 #include "ftp_paths.h"
 
+#include "../platform/path_utf8.h"
+
 #include <filesystem>
 
 namespace core {
@@ -40,11 +42,15 @@ std::string normalizeFtpPath(const std::string& rootPath, const std::string& rel
     while (start < rel.size() && (rel[start] == '/' || rel[start] == '\\')) ++start;
     rel = rel.substr(start);
 
-    const fs::path base = safeWeaklyCanonical(fs::path(rootPath));
-    const fs::path combined = rel.empty() ? base : safeWeaklyCanonical(base / rel);
+    // rootPath/rel 是协议层的 UTF-8 字符串,不能直接用 fs::path(std::string)/
+    // path::string() 互转——那两个默认走 Windows 的 ANSI 代码页,遇到代码页之外
+    // 的字符(比如系统语言非中文时的中文文件名)会转丢甚至抛异常。见
+    // core/platform/path_utf8.h 的详细说明。
+    const fs::path base = safeWeaklyCanonical(utf8ToPath(rootPath));
+    const fs::path combined = rel.empty() ? base : safeWeaklyCanonical(base / utf8ToPath(rel));
 
-    const std::string baseStr = base.string();
-    const std::string combinedStr = combined.string();
+    const std::string baseStr = pathToUtf8(base);
+    const std::string combinedStr = pathToUtf8(combined);
 
     if (combinedStr == baseStr) return combinedStr;
 

@@ -1,6 +1,7 @@
 #include "ftp_session.h"
 
 #include "ftp_paths.h"
+#include "../platform/path_utf8.h"
 
 #include <algorithm>
 #include <atomic>
@@ -200,7 +201,7 @@ void FtpSession::handleCwd(const std::string& arg) {
     const std::string newVirtual = resolveVirtualPath(arg);
     const std::string osPath = normalizeFtpPath(m_rootPath, newVirtual);
     std::error_code ec;
-    if (!fs::is_directory(osPath, ec) || ec) {
+    if (!fs::is_directory(utf8ToPath(osPath), ec) || ec) {
         sendReply(550, "Failed to change directory: not a directory");
         return;
     }
@@ -225,13 +226,13 @@ void FtpSession::handleMkd(const std::string& arg) {
     if (!requireLoggedIn()) return;
     const std::string newVirtual = resolveVirtualPath(arg);
     const std::string osPath = normalizeFtpPath(m_rootPath, newVirtual);
-    const fs::path p(osPath);
-    if (!isValidFtpName(p.filename().string())) {
+    const fs::path p = utf8ToPath(osPath);
+    if (!isValidFtpName(pathToUtf8(p.filename()))) {
         sendReply(553, "Invalid directory name");
         return;
     }
     std::error_code ec;
-    fs::create_directories(osPath, ec);
+    fs::create_directories(p, ec);
     if (ec) {
         sendReply(550, "Failed to create directory");
         return;
@@ -242,12 +243,13 @@ void FtpSession::handleMkd(const std::string& arg) {
 void FtpSession::handleRmd(const std::string& arg) {
     if (!requireLoggedIn()) return;
     const std::string osPath = normalizeFtpPath(m_rootPath, resolveVirtualPath(arg));
+    const fs::path p = utf8ToPath(osPath);
     std::error_code ec;
-    if (!fs::is_directory(osPath, ec)) {
+    if (!fs::is_directory(p, ec)) {
         sendReply(550, "Directory not found");
         return;
     }
-    fs::remove_all(osPath, ec);
+    fs::remove_all(p, ec);
     if (ec) {
         sendReply(550, "Failed to remove directory");
         return;
@@ -258,12 +260,13 @@ void FtpSession::handleRmd(const std::string& arg) {
 void FtpSession::handleDele(const std::string& arg) {
     if (!requireLoggedIn()) return;
     const std::string osPath = normalizeFtpPath(m_rootPath, resolveVirtualPath(arg));
+    const fs::path p = utf8ToPath(osPath);
     std::error_code ec;
-    if (!fs::is_regular_file(osPath, ec)) {
+    if (!fs::is_regular_file(p, ec)) {
         sendReply(550, "File not found");
         return;
     }
-    fs::remove(osPath, ec);
+    fs::remove(p, ec);
     if (ec) {
         sendReply(550, "Failed to delete file");
         return;
@@ -276,7 +279,7 @@ void FtpSession::handleRnfr(const std::string& arg) {
     const std::string virtualPath = resolveVirtualPath(arg);
     const std::string osPath = normalizeFtpPath(m_rootPath, virtualPath);
     std::error_code ec;
-    if (!fs::exists(osPath, ec)) {
+    if (!fs::exists(utf8ToPath(osPath), ec)) {
         sendReply(550, "File/directory not found");
         return;
     }
@@ -295,13 +298,13 @@ void FtpSession::handleRnto(const std::string& arg) {
     const std::string toOs = normalizeFtpPath(m_rootPath, toVirtual);
     m_renameFrom.clear();
 
-    const fs::path toP(toOs);
-    if (!isValidFtpName(toP.filename().string())) {
+    const fs::path toP = utf8ToPath(toOs);
+    if (!isValidFtpName(pathToUtf8(toP.filename()))) {
         sendReply(553, "Invalid name");
         return;
     }
     std::error_code ec;
-    fs::rename(fromOs, toOs, ec);
+    fs::rename(utf8ToPath(fromOs), toP, ec);
     if (ec) {
         sendReply(550, "Rename failed");
         return;
@@ -355,8 +358,9 @@ void FtpSession::handleList(const std::string& arg, bool mlsd) {
     if (!requireLoggedIn()) return;
     const std::string virtualPath = arg.empty() ? m_cwd : resolveVirtualPath(arg);
     const std::string osPath = normalizeFtpPath(m_rootPath, virtualPath);
+    const fs::path dirPath = utf8ToPath(osPath);
     std::error_code ec;
-    if (!fs::is_directory(osPath, ec)) {
+    if (!fs::is_directory(dirPath, ec)) {
         sendReply(550, "Not a directory");
         return;
     }
@@ -369,18 +373,18 @@ void FtpSession::handleList(const std::string& arg, bool mlsd) {
     sendReply(150, "Here comes the directory listing");
 
     std::vector<fs::directory_entry> entries;
-    for (auto& e : fs::directory_iterator(osPath, ec)) entries.push_back(e);
+    for (auto& e : fs::directory_iterator(dirPath, ec)) entries.push_back(e);
     std::sort(entries.begin(), entries.end(), [](const fs::directory_entry& a, const fs::directory_entry& b) {
         const bool ad = a.is_directory();
         const bool bd = b.is_directory();
         if (ad != bd) return ad && !bd;
-        return a.path().filename().string() < b.path().filename().string();
+        return pathToUtf8(a.path().filename()) < pathToUtf8(b.path().filename());
     });
 
     std::ostringstream out;
     for (auto& e : entries) {
         std::error_code entryEc;
-        const std::string name = e.path().filename().string();
+        const std::string name = pathToUtf8(e.path().filename());
         const bool isDir = e.is_directory(entryEc);
         const uint64_t size = isDir ? 0 : static_cast<uint64_t>(e.file_size(entryEc));
         if (mlsd) {
@@ -406,16 +410,17 @@ void FtpSession::handleList(const std::string& arg, bool mlsd) {
 void FtpSession::handleRetr(const std::string& arg) {
     if (!requireLoggedIn()) return;
     const std::string osPath = normalizeFtpPath(m_rootPath, resolveVirtualPath(arg));
+    const fs::path filePath = utf8ToPath(osPath);
     const uint64_t offset = m_restOffset;
     m_restOffset = 0;
 
     std::error_code ec;
-    if (!fs::is_regular_file(osPath, ec)) {
+    if (!fs::is_regular_file(filePath, ec)) {
         sendReply(550, "File not found");
         return;
     }
 
-    std::ifstream file(osPath, std::ios::binary);
+    std::ifstream file(filePath, std::ios::binary);
     if (!file.is_open()) {
         sendReply(550, "Cannot open file");
         return;
@@ -431,8 +436,8 @@ void FtpSession::handleRetr(const std::string& arg) {
 
     // RETR 是服务端发送、大小提前已知(文件本身的大小),不像 STOR 那样 total 只能
     // 传 0——和 core::FtpClient 自己下载时上报的语义一致。
-    const uint64_t totalSize = static_cast<uint64_t>(fs::file_size(osPath, ec));
-    const std::string fileName = fs::path(osPath).filename().string();
+    const uint64_t totalSize = static_cast<uint64_t>(fs::file_size(filePath, ec));
+    const std::string fileName = pathToUtf8(filePath.filename());
     if (m_onTransferStarted) m_onTransferStarted(m_sessionId, fileName, /*isUpload=*/false);
 
     std::vector<char> chunk(kChunkSize);
@@ -463,8 +468,8 @@ void FtpSession::handleRetr(const std::string& arg) {
 void FtpSession::handleStor(const std::string& arg) {
     if (!requireLoggedIn()) return;
     const std::string osPath = normalizeFtpPath(m_rootPath, resolveVirtualPath(arg));
-    const fs::path p(osPath);
-    if (!isValidFtpName(p.filename().string())) {
+    const fs::path p = utf8ToPath(osPath);
+    if (!isValidFtpName(pathToUtf8(p.filename()))) {
         sendReply(553, "Invalid file name");
         m_restOffset = 0;
         return;
@@ -477,12 +482,12 @@ void FtpSession::handleStor(const std::string& arg) {
     m_restOffset = 0;
 
     std::fstream file;
-    if (offset > 0 && fs::exists(osPath, ec)) {
-        file.open(osPath, std::ios::binary | std::ios::in | std::ios::out);
+    if (offset > 0 && fs::exists(p, ec)) {
+        file.open(p, std::ios::binary | std::ios::in | std::ios::out);
         if (file.is_open()) file.seekp(static_cast<std::streamoff>(offset));
     }
     if (!file.is_open()) {
-        file.open(osPath, std::ios::binary | std::ios::out | std::ios::trunc);
+        file.open(p, std::ios::binary | std::ios::out | std::ios::trunc);
     }
     if (!file.is_open()) {
         sendReply(550, "Cannot open file for writing");
@@ -498,7 +503,7 @@ void FtpSession::handleStor(const std::string& arg) {
 
     // STOR 是服务端接收:标准 FTP 没有让客户端预先声明文件总大小的机制,total 传
     // 0 表示"未知"——和 core::FtpClient 自己上传时上报进度的约定完全一致。
-    const std::string fileName = p.filename().string();
+    const std::string fileName = pathToUtf8(p.filename());
     if (m_onTransferStarted) m_onTransferStarted(m_sessionId, fileName, /*isUpload=*/true);
 
     std::vector<char> chunk(kChunkSize);

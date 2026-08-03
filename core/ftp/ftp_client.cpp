@@ -1,8 +1,11 @@
 #include "ftp_client.h"
 
+#include "../platform/path_utf8.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -429,14 +432,20 @@ FtpResult FtpClient::list(const std::string& path, std::vector<FtpFileEntry>& ou
 FtpResult FtpClient::downloadFile(const std::string& remotePath, const std::string& localPath, uint64_t resumeOffset) {
     if (!isConnected() || !m_loggedIn) return FtpResult::NotConnected;
 
+    // localPath 是协议层的 UTF-8 字符串(来自 Qt QString::toStdString()),不能直接
+    // 交给 fstream 的 std::string 重载——Windows 上那个重载按 ANSI 代码页解释窄
+    // 字符串,不是 UTF-8,本地路径带非当前代码页字符时会打开失败。转成 fs::path
+    // 再传给 fstream,则会走 wchar_t 原生路径,不受代码页限制。见
+    // core/platform/path_utf8.h。
+    const std::filesystem::path localFsPath = utf8ToPath(localPath);
     uint64_t effectiveOffset = resumeOffset;
     std::fstream file;
     if (effectiveOffset > 0) {
-        file.open(localPath, std::ios::binary | std::ios::in | std::ios::out);
+        file.open(localFsPath, std::ios::binary | std::ios::in | std::ios::out);
         if (!file.is_open()) effectiveOffset = 0; // 本地文件不存在,只能从头下载
     }
     if (!file.is_open()) {
-        file.open(localPath, std::ios::binary | std::ios::out | std::ios::trunc);
+        file.open(localFsPath, std::ios::binary | std::ios::out | std::ios::trunc);
     }
     if (!file.is_open()) {
         reportError("cannot open local file for write: " + localPath);
@@ -558,7 +567,7 @@ FtpResult FtpClient::downloadFile(const std::string& remotePath, const std::stri
 FtpResult FtpClient::uploadFile(const std::string& localPath, const std::string& remotePath, uint64_t resumeOffset) {
     if (!isConnected() || !m_loggedIn) return FtpResult::NotConnected;
 
-    std::ifstream file(localPath, std::ios::binary);
+    std::ifstream file(utf8ToPath(localPath), std::ios::binary);
     if (!file.is_open()) {
         reportError("cannot open local file for read: " + localPath);
         return FtpResult::IoError;
